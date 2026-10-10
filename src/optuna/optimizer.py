@@ -7,6 +7,7 @@ from optuna.pruners import BasePruner
 from optuna.samplers import BaseSampler
 from typing import (
     Any,
+    Callable,
     Dict,
     List,
     Optional,
@@ -18,10 +19,101 @@ from typing import (
 logger = logging.getLogger("OptunaOptimizer")
 
 
+# TODO:
+#   *   The "transform_fnc" recieven a Trial object, can be usefull as Trial have the "params" attribute, 
+#       which is a dictionary of the hyperparameter values suggested by the trial. 
+#       If a parameter is not suggested by the trial, it will not be present in the "params" dictionary.
 class OptunaParamSpec:
-    pass
+    """
+    Represents a hyperparameter specification for Optuna optimization.
+
+    Notes
+    -----
+    *   Using numerical distribution is better to take the best advantage of the sampler algorithms. 
+        Only use categorical distributions for non-related parameter values (e.g., string options). 
+        If you have ordered numerical data, but it's sparse and non-uniform, the best practice is to have 
+        the sampler choose from the indices of the list (which is a simple integer range) and then you 
+        map that index back to the actual value. Example::
+
+            real_options = [0, 1, 2, 4, 8, 12, 24, 48, 72, 96, 120, 144, 168]
+            option_index = trial.suggest_int("param_index", 0, len(real_options) - 1)
+            value = real_options[option_index]
+    
+    *   If the parameter space have mixed types (e.g., strings and integers) the best approach is to create 
+        a two-step conditional choice::
+
+            param_type = trial.suggest_categorical("param_type", ["int", "str"])
+            if param_type == "int":
+                value = trial.suggest_int("param_value", 0, 100)
+            else:
+                value = trial.suggest_categorical("param_value", ["option1", "option2", "option3"])
 
 
+    Parameters
+    ----------
+    name : str
+        Hyperparameter name.
+    
+    type : str
+        Hyperparameter type. Supported types are: "int", "float", "categorical".
+    
+    options : Dict[str, Any]
+        Mapping with hyperparameter sampling options. Required keys depend on the hyperparameter type:
+
+        * For "int" and "float" types: "low", "high", "step", "log".
+        * For "categorical" type: "choices".
+    
+    default : Any, optional
+        Default value for the hyperparameter.
+    
+    transform_fnc : Callable[[optuna.Trial, Any], Any], optional
+        Transformation function that takes an Optuna Trial object and the suggested hyperparameter value, 
+        and returns a transformed value for the hyperparameter. This can be used to apply custom 
+        transformations to the suggested values before they are used in the objective function.
+    """
+    def __init__(
+            self, 
+            name: str, 
+            type: str,
+            options: Dict[str, Any],
+            *,
+            default: Optional[Any] = None,
+            transform_fnc: Optional[Callable] = None
+    ):
+        self.name = name
+        self.type = type
+        self.options = options
+        self.default = default
+        self.transform_fnc = transform_fnc
+
+    def suggest(self, trial: optuna.Trial) -> Any:
+        """Suggests a hyperparameter value based on the current Optuna Trial object."""
+        if self.type == "int":
+            value = trial.suggest_int(name=self.name, **self.options)
+        elif self.type == "float":
+            value = trial.suggest_float(name=self.name, **self.options)
+        elif self.type == "categorical":
+            value = trial.suggest_categorical(name=self.name, **self.options)
+        else:
+            raise ValueError(f"Unsupported hyperparameter type: {self.type}")
+
+        # Apply transformation function if provided
+        if self.transform_fnc is not None:
+            try:
+                old_value = value
+                value = self.transform_fnc(trial, value)
+                logger.debug(f"Transformed value for hyperparameter '{self.name}': {old_value} --> {value}")
+            except Exception as e:
+                raise RuntimeError(f"Error applying transform function for hyperparameter '{self.name}': {e}")
+
+        return value
+
+
+# TODO:
+#   *   Include a "params_dependencies" argument to define conditional hyperparameter dependencies.
+#       It will have a dictionary where the keys are the names of the hyperparameters and the values 
+#       are lists of hyperparameter names that the key hyperparameter depends on.
+#       That way, we can order the suggestions in the objective function based on the dependencies.
 class BaseOptunaOptimizer(abc.ABC):
     """
     Note
