@@ -187,13 +187,20 @@ class BaseOptunaOptimizer(abc.ABC):
     
         logger.debug("[Finish] _validate_inputs()")
 
-    # TODO: Implement
-    def _objective(self, trial: optuna.Trial) -> Union[float, Sequence[float]]:
-        pass
 
     @abc.abstractmethod
     def supports_pruning(self) -> bool:
         """Returns whether pruning is supported for the current optimizer."""
+        raise NotImplementedError()
+
+    @abc.abstractmethod
+    def create_model(self, params: Dict[str, Any]) -> Any:
+        """Creates and returns a model instance based on the suggested parameter values."""
+        raise NotImplementedError()
+
+    @abc.abstractmethod
+    def evaluate_model(self, model: Any) -> Dict[str, float]:
+        """Evaluates the given model and returns a dictionary of metric names and their corresponding values."""
         raise NotImplementedError()
 
 
@@ -284,6 +291,77 @@ class BaseOptunaOptimizer(abc.ABC):
         }
         logger.debug("[Finish] setup_study()")
 
+    def on_trial_start(self, trial: optuna.Trial):
+        """
+        Hook called at the start of each trial. 
+
+        Parameters
+        ----------
+        trial : optuna.Trial
+            The current Optuna trial object. Suggested parameter values can 
+            be accessed via ``trial.params`` attribute.
+        """
+        pass
+
+    def on_trial_end(self, trial: optuna.Trial, value: Union[float, tuple]):
+        """
+        Hook called at the end of each trial.
+
+        Parameters
+        ----------
+        trial : optuna.trial.Trial
+            The current Optuna trial object. Suggested parameter values can 
+            be accessed via ``trial.params`` attribute.
+
+        value : float | tuple
+            The objective value(s) obtained in the current trial. Match the 
+            order of the ``metric_names`` attribute of the optimizer.
+        """
+        pass
+
+    def objective(self, trial: optuna.Trial) -> Union[float, Sequence[float]]:
+        # TODO: Support conditional hyperparameter dependencies
+        # Suggest hyperparameter values 
+        trial_suggestions = {
+            param.name: param.suggest(trial) 
+            for param in self.parameters
+        }
+
+        # Optional hook at the start of the trial
+        self.on_trial_start(trial)
+
+        # Create and evaluate the model
+        try:
+            trial_model = self.create_model(trial_suggestions)
+            trial_metrics = self.evaluate_model(trial_model)
+        except optuna.TrialPruned as e:
+            logger.info(f"Trial {trial.number} pruned: {e}")
+            raise e
+        except Exception as e:
+            logger.error(f"Trial {trial.number} failed: {e}")
+            raise e
+
+        # Check for the required metrics
+        missing_metrics = set(self.metric_names) - set(trial_metrics.keys())
+        if missing_metrics:
+            raise ValueError(f"Missing required metrics in trial evaluation: {missing_metrics}. Got: {trial_metrics}")
+
+        # Extract the objective values in the correct order
+        objective_value = tuple(trial_metrics[metric_name] for metric_name in self.metric_names)
+        if len(objective_value) == 1:
+            # Single metric value for single-objective optimization
+            objective_value = objective_value[0]
+
+        # Attach remaining metrics to trial attributes
+        for metric_name, metric_value in trial_metrics.items():
+            if metric_name not in self.metric_names:
+                trial.set_user_attr(metric_name, metric_value)
+        
+        # Optional hook at the end of the trial
+        self.on_trial_end(trial, objective_value)
+        
+        return objective_value
+
     def optimize(
             self,
             n_trials: Optional[int] = None,
@@ -327,7 +405,7 @@ class BaseOptunaOptimizer(abc.ABC):
 
         # Execute the optimization process
         t0 = time.perf_counter()
-        self.study.optimize(func=self._objective, n_trials=n_trials, timeout=timeout, n_jobs=n_jobs)
+        self.study.optimize(func=self.objective, n_trials=n_trials, timeout=timeout, n_jobs=n_jobs)
         process_time = time.strftime("%H:%M:%S", time.gmtime(time.perf_counter() - t0))
         logger.info(f"Optimization completed. Time: {process_time}")
 
