@@ -1,24 +1,32 @@
 import abc
 import logging
+import time
+from dataclasses import dataclass
+
 import numpy
 import optuna
 import pandas
-import time
 
 from numpy.typing import NDArray
 from optuna.pruners import BasePruner
 from optuna.samplers import BaseSampler
 from sklearn.base import BaseEstimator
 from sklearn.base import clone as sklearn_clone
+from sklearn.base import is_classifier as sklearn_is_classifier
 from sklearn.metrics import get_scorer as sklearn_get_scorer
+from sklearn.model_selection import BaseCrossValidator
+from sklearn.model_selection import KFold
+from sklearn.model_selection import StratifiedKFold
 from sklearn.model_selection import cross_validate as sklearn_cross_validate
 from typing import (
     Any,
     Callable,
     Dict,
     List,
+    Mapping,
     Optional,
     Sequence,
+    Tuple,
     Union
 )
 
@@ -26,10 +34,8 @@ from typing import (
 logger = logging.getLogger("OptunaOptimizer")
 
 
-# TODO:
-#   *   The "transform_fnc" recieven a Trial object, can be usefull as Trial have the "params" attribute, 
-#       which is a dictionary of the hyperparameter values suggested by the trial. 
-#       If a parameter is not suggested by the trial, it will not be present in the "params" dictionary.
+
+# TODO: Model parameter dependencies logic and transformations as a module-level class thought for non-code users in a interactive optimization app.
 class OptunaParamSpec:
     """
     Represents a hyperparameter specification for Optuna optimization.
@@ -73,10 +79,17 @@ class OptunaParamSpec:
     default : Any, optional
         Default value for the hyperparameter.
     
+    depends_on : Sequence[str], optional
+            Names of parameters that must be resolved before this parameter. Dependencies determine
+            the suggestion order and make a parameter inactive when any dependency is inactive.
+
     transform_fnc : Callable[[optuna.Trial, Any], Any], optional
         Transformation function that takes an Optuna Trial object and the suggested hyperparameter value, 
         and returns a transformed value for the hyperparameter. This can be used to apply custom 
         transformations to the suggested values before they are used in the objective function.
+
+        Note that you can use the ``trial.params`` attribute which is a dictionary mapping parameter names 
+        to their current suggested values. 
     """
     def __init__(
             self, 
@@ -85,42 +98,41 @@ class OptunaParamSpec:
             options: Dict[str, Any],
             *,
             default: Optional[Any] = None,
-            transform_fnc: Optional[Callable] = None
+            depends_on: Optional[Sequence[str]] = None,
+            transform_fnc: Optional[Callable[[optuna.Trial, Any], Any]] = None,
     ):
         self.name = name
         self.type = type
         self.options = options
         self.default = default
+        self.depends_on = tuple(depends_on) if depends_on is not None else tuple()
         self.transform_fnc = transform_fnc
+
+        if (transform_fnc is not None) and (not callable(transform_fnc)):
+            raise ValueError("The `transform_fnc` argument must be callable.")
+
 
     def suggest(self, trial: optuna.Trial) -> Any:
         """Suggests a hyperparameter value based on the current Optuna Trial object."""
+        # Suggest the hyperparameter value based on its type and options
         if self.type == "int":
-            value = trial.suggest_int(name=self.name, **self.options)
+            suggested_value = trial.suggest_int(name=self.name, **self.options)
         elif self.type == "float":
-            value = trial.suggest_float(name=self.name, **self.options)
+            suggested_value = trial.suggest_float(name=self.name, **self.options)
         elif self.type == "categorical":
-            value = trial.suggest_categorical(name=self.name, **self.options)
+            suggested_value = trial.suggest_categorical(name=self.name, **self.options)
         else:
             raise ValueError(f"Unsupported hyperparameter type: {self.type}")
 
         # Apply transformation function if provided
         if self.transform_fnc is not None:
-            try:
-                old_value = value
-                value = self.transform_fnc(trial, value)
-                logger.debug(f"Transformed value for hyperparameter '{self.name}': {old_value} --> {value}")
-            except Exception as e:
-                raise RuntimeError(f"Error applying transform function for hyperparameter '{self.name}': {e}")
-
-        return value
+            old_value = suggested_value
+            suggested_value = self.transform_fnc(trial, suggested_value)
+            logger.debug(f"Parameter '{self.name}' transformed: {old_value} --> {suggested_value}")
+        
+        return suggested_value
 
 
-# TODO:
-#   *   Include a "params_dependencies" argument to define conditional hyperparameter dependencies.
-#       It will have a dictionary where the keys are the names of the hyperparameters and the values 
-#       are lists of hyperparameter names that the key hyperparameter depends on.
-#       That way, we can order the suggestions in the objective function based on the dependencies.
 class BaseOptunaOptimizer(abc.ABC):
     """
     Note
@@ -131,7 +143,7 @@ class BaseOptunaOptimizer(abc.ABC):
     Parameters
     ----------
     params : List[OptunaParamSpec]
-        A list of `OptunaParamSpec` defining the hyperparameter search space to optimize.
+        Hyperparameter search space to optimize.
 
     metrics : Dict[str, str]
         Mapping of objective metric names to optimize and the corresponding optimization 
@@ -143,57 +155,85 @@ class BaseOptunaOptimizer(abc.ABC):
         minimizing the ``overfit_index`` metric score (i.e., a multi-objective optimization problem).
     """
     def __init__(self, params: List[OptunaParamSpec], metrics: Dict[str, str]):
-        # Validate inputs
-        self._validate_inputs(params, metrics)
-
-        self.parameters: List[OptunaParamSpec] = params # Parameters to optimize
+        self.parameters = self._validate_params(params) # Parameter specifications to optimize
         self.metric_names: List[str] = []               # Metric names to optimize
         self.metric_directions: List[str] = []          # Metric optimization directions (minimize or maximize)
         self.study: Optional[optuna.Study] = None       # Optuna Study instace for optimization process
-        
         self.metadata: Dict[str, Any] = {
             "study": None,      # name, storage, metric names, directions, pruner name, sampler name
             "optimize": None,   # execution time, trials info, best trial(s) info
         }
         
-        # Populate metric names and directions
+        # Populate metric names and directions ordered 
+        metrics = self._validate_metrics(metrics)
         for metric_name, metric_direction in metrics.items():
             self.metric_names.append(metric_name)
             self.metric_directions.append(metric_direction)
 
-
-    def _validate_inputs(self, params: List[OptunaParamSpec], metrics: Dict[str, str]):
-        """Validates the input arguments for the optimizer."""
-        logger.debug("[Start] _validate_inputs()")
+    @staticmethod
+    def _validate_params(params: List[OptunaParamSpec]) -> Tuple[OptunaParamSpec, ...]:
+        logger.debug("[Start] _validate_params()")
         
-        # Search space parameters
-        # ---------------------------------
-        # Main container type
+        # Check data type and non-empty list
         if not isinstance(params, list):
             raise ValueError("`params` must be a list of `OptunaParamSpec`.")
-        
-        # Container element types
-        param_types = [type(param) for param in params]
-        if not all(issubclass(param_type, OptunaParamSpec) for param_type in param_types):
+        if not params:
+            raise ValueError("`params` must contain at least one `OptunaParamSpec`.")
+        if not all(isinstance(param, OptunaParamSpec) for param in params):
+            param_types = [type(param) for param in params]
             raise ValueError(f"Elements in `params` must be `OptunaParamSpec` instances. Got: {param_types}.")
 
-        # Empty parameters
-        if len(params) == 0:
-            raise ValueError("`params` must contain at least one `OptunaParamSpec`.")
-        
-        
+        # Check for unique parameter names
+        parameter_names: set[str] = set()
+        for parameter in params:
+            if not isinstance(parameter.name, str) or not parameter.name:
+                raise ValueError("Every parameter name must be a non-empty string.")
+            if parameter.name in parameter_names:
+                raise ValueError(f"Duplicate parameter name: '{parameter.name}'.")
+            parameter_names.add(parameter.name)
+
+        # Check that dependencies are valid
+        for parameter in params:
+            if not all(isinstance(name, str) and name for name in parameter.depends_on):
+                raise ValueError(f"Dependencies for parameter '{parameter.name}' must be non-empty strings.")
+
+            dependencies = set(parameter.depends_on)
+            if len(dependencies) != len(parameter.depends_on):
+                raise ValueError(f"Parameter '{parameter.name}' contains duplicate dependencies.")
+
+            missing_dependencies = dependencies - parameter_names
+            if missing_dependencies:
+                raise ValueError(
+                    f"Parameter '{parameter.name}' depends on unknown parameter(s): "
+                    f"{sorted(missing_dependencies)}."
+                )
+
+        logger.debug("[Finish] _validate_params()")
+        return tuple(params)
+
+    @staticmethod
+    def _validate_metrics(metrics: Dict[str, str]) -> Dict[str, str]:
+        """Validates the input arguments for the optimizer."""
+        logger.debug("[Start] _validate_metrics()")
+
         # Optimization metrics
         # ---------------------------------
         # Main container type
         if not isinstance(metrics, dict):
             raise ValueError("`metrics` must be a dictionary mapping objective metric names to optimization directions.")
-        
+
+        if not metrics:
+            raise ValueError("`metrics` must contain at least one objective metric.")
+
         # Container element values
         for metric_name, direction in metrics.items():
+            if not isinstance(metric_name, str) or not metric_name:
+                raise ValueError("Metric names must be non-empty strings.")
             if direction not in {"minimize", "maximize"}:
                 raise ValueError(f"Direction for metric '{metric_name}' must be either 'minimize' or 'maximize'.")
     
-        logger.debug("[Finish] _validate_inputs()")
+        logger.debug("[Finish] _validate_metrics()")
+        return metrics
 
 
     @abc.abstractmethod
@@ -207,8 +247,8 @@ class BaseOptunaOptimizer(abc.ABC):
         raise NotImplementedError()
 
     @abc.abstractmethod
-    def evaluate_model(self, model: Any) -> Dict[str, float]:
-        """Evaluates the given model and returns a dictionary of metric names and their corresponding values."""
+    def evaluate_model(self, model: Any, suggestions: Dict[str, Any]) -> Dict[str, float]:
+        """Train and evaluates a model using the resolved suggestions for the current trial."""
         raise NotImplementedError()
 
 
@@ -341,7 +381,7 @@ class BaseOptunaOptimizer(abc.ABC):
         # Create and evaluate the model
         try:
             trial_model = self.create_model(trial_suggestions)
-            trial_metrics = self.evaluate_model(trial_model)
+            trial_metrics = self.evaluate_model(trial_model, trial_suggestions)
         except optuna.TrialPruned as e:
             logger.info(f"Trial {trial.number} pruned: {e}")
             raise e
@@ -370,12 +410,7 @@ class BaseOptunaOptimizer(abc.ABC):
         
         return objective_value
 
-    def optimize(
-            self,
-            n_trials: Optional[int] = None,
-            timeout: Optional[int] = None,
-            n_jobs: int = 1
-    ):
+    def optimize(self, n_trials: Optional[int] = None, timeout: Optional[int] = None, n_jobs: int = 1):
         """
         Executes the optimization process using the configured study and objective function.
 
@@ -457,177 +492,4 @@ class BaseOptunaOptimizer(abc.ABC):
 
         logger.debug("[Finish] optimize()")
 
-
-class SklearnOptunaOptimizer(BaseOptunaOptimizer):
-    """
-    A custom optimizer for scikit-learn estimators using Optuna.
-
-    Parameters
-    ----------
-    params : List[OptunaParamSpec]
-        Hyperparameter specifications for the search space.
-    
-    metrics : Dict[str, str]
-        Mapping of metric names to optimization directions ("minimize" or "maximize").
-    
-    estimator : BaseEstimator
-        A scikit-learn estimator instance to optimize.
-    
-    cv : int, optional
-        The number of folds in a ``(Stratified)KFold`` for the cross-validation splitting strategy.
-        Default is 5.
-    
-    scoring : List[str], optional
-        List of strategies to evaluate the performance of the estimator across cross-validation splits 
-        (see [string name scorers](https://scikit-learn.org/stable/modules/model_evaluation.html#scoring-api-overview)). 
-        If None (default), the ``estimator``'s [default evaluation criterion](https://scikit-learn.org/stable/modules/model_evaluation.html#scoring-api-overview) is used.
-    
-    n_jobs : int, optional
-        Number of jobs to run in parallel. Training the estimator and computing the score are parallelized 
-        over the cross-validation splits. Default is 1 unless in a [``joblib.parallel_backend``](https://joblib.readthedocs.io/en/latest/generated/joblib.parallel_backend.html#joblib.parallel_backend) 
-        context. -1 means using all processors. See [Glossary](https://scikit-learn.org/stable/glossary.html#term-n_jobs) 
-        for more details.
-    """
-    def __init__(
-            self, 
-            params: List[OptunaParamSpec], 
-            metrics: Dict[str, str],
-            estimator: BaseEstimator,
-            *,
-            cv: int = 5,
-            scoring: Optional[List[str]] = None,
-            n_jobs: int = 1
-    ):
-        super().__init__(params, metrics)
-
-        # Validate the estimator class
-        if not issubclass(type(estimator), BaseEstimator):
-            raise ValueError(f"Estimator must be a subclass of 'sklearn.base.BaseEstimator'. Got: {type(estimator)}")
-
-        self.estimator: BaseEstimator = estimator
-        self.cv: int = cv
-        self.scoring: List[str] = scoring if scoring is not None else []
-        self.n_jobs: int = n_jobs
-
-    @property
-    def cv_results_(self) -> pandas.DataFrame:
-        df = pandas.DataFrame()
-        
-        if self.study is not None:
-            # Get the study trials as a DataFrame
-            df = self.study.trials_dataframe()
-
-            if not df.empty:
-                # Include the hyperparameters as a single dictionary column
-                param_names = [param.name for param in self.parameters]
-                df["params"] = df.apply(
-                    lambda row: {model_param: row["params_" + model_param] for model_param in param_names},
-                    axis=1
-                )
-
-                # Rename columns to remove "user_attrs_" prefix and replace "params_" prefix by "param_"
-                rename_mapping = {
-                    col_name: col_name.replace("user_attrs_", "")
-                    for col_name in df.columns
-                    if col_name.startswith("user_attrs_")
-                }
-                rename_mapping.update({
-                    "params_" + param_name: "param_" + param_name
-                    for param_name in param_names
-                })
-                df.rename(columns=rename_mapping, inplace=True)
-
-        return df
-
-
-    def supports_pruning(self) -> bool:
-        return hasattr(self.estimator, "partial_fit")
-
-    def create_model(self, suggestions: Dict[str, Any]) -> Any:
-        # New unfitted estimator with the same parameters
-        estimator_clone = sklearn_clone(self.estimator)
-
-        # Filter the suggested parameters to only include those that are valid for the estimator
-        valid_params = estimator_clone.get_params()
-        model_params = {
-            param_name: param_value 
-            for param_name, param_value in suggestions.items()
-            if param_name in valid_params
-        }
-
-        # Set the valid parameters to the cloned estimator
-        estimator_clone.set_params(**model_params)
-
-        return estimator_clone
-
-    # TODO: Implement (x_train, y_train, x_test, y_test)
-    def evaluate_model(self, model: Any) -> Dict[str, float]:
-        # TODO: Include logic for optional cross-validation. 
-        #       For instance, if the user provides a validation set, 
-        #       we can use it for evaluation instead of cross-validation.
-        
-        # Prepare the training, validation, and test data
-        x_train, y_train = self._train_data
-        x_val, y_val = self._val_data
-        x_test, y_test = self._test_data
-        
-        # If given validation data, join it with training data for cross-validation
-        if (x_val is not None) and (y_val is not None):
-            x_train = numpy.vstack([x_train, x_val])
-            y_train = numpy.hstack([y_train, y_val])
-        
-        # Join the objective metrics and the additional scoring metrics for evaluation
-        evaluate_scores = self.metric_names + self.scoring
-        
-        # Perform cross-validation
-        # Output is a mapping of evaluation name and array of scores (one per cross-validation split)
-        # Example: { "fit_time": [...], "score_time": [...], "test_<scorer>": [...], "train_<scorer>": [...] }
-        cv_scores: Dict[str, NDArray] = sklearn_cross_validate(
-            estimator=model,
-            X=x_train,
-            y=y_train,
-            scoring=evaluate_scores,
-            cv=self.cv,
-            n_jobs=self.n_jobs,
-            return_train_score=False,
-        )
-
-        # Format the cross-validation scores
-        # { "mean_<score_name>": <float>, "std_<score_name>": <float>, "split<i>_<score_name>": <float> }
-        train_metrics: Dict[str, float] = {}
-        for score_name, score_array in cv_scores.items():
-            # Change "test_" prefix to "val_"
-            if score_name.startswith("test_"):
-                score_name = score_name.replace("test_", "val_")
-
-            # Store individual split scores
-            # Example: "split0_val_accuracy", "split1_val_accuracy", ...
-            if score_name.startswith("val_") or score_name.startswith("train_"):
-                for idx, score_value in enumerate(score_array):
-                    metric_name = "split{}_{}".format(idx, score_name)
-                    train_metrics[metric_name] = float(score_value)
-
-            # Store the aggregated metrics: mean and std
-            train_metrics[f"mean_{score_name}"] = float(numpy.nanmean(score_array))
-            train_metrics[f"std_{score_name}"] = float(numpy.nanstd(score_array))
-
-        # Include the objective metrics with the correct name to report
-        # This won't be duplicated in the user attributes of the trial
-        objective_metrics: Dict[str, float] = {}
-        for metric_name in self.metric_names:
-            objective_metrics[metric_name] = train_metrics[f"mean_val_{metric_name}"]
-
-        # Include test data evaluation if provided
-        test_metrics: Dict[str, float] = {}
-        if (x_test is not None) and (y_test is not None):
-            # Fit the estimator on the full training data
-            model.fit(x_train, y_train)
-
-            # Compute and store each test score
-            for score_name in evaluate_scores:
-                score_func = sklearn_get_scorer(score_name)
-                test_score_value = score_func(model, x_test, y_test)
-                test_metrics[f"test_{score_name}"] = float(test_score_value)
-
-        return {**train_metrics, **objective_metrics, **test_metrics}
 
