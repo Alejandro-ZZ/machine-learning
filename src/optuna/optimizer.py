@@ -1,10 +1,17 @@
 import abc
 import logging
+import numpy
 import optuna
+import pandas
 import time
 
+from numpy.typing import NDArray
 from optuna.pruners import BasePruner
 from optuna.samplers import BaseSampler
+from sklearn.base import BaseEstimator
+from sklearn.base import clone as sklearn_clone
+from sklearn.metrics import get_scorer as sklearn_get_scorer
+from sklearn.model_selection import cross_validate as sklearn_cross_validate
 from typing import (
     Any,
     Callable,
@@ -143,9 +150,10 @@ class BaseOptunaOptimizer(abc.ABC):
         self.metric_names: List[str] = []               # Metric names to optimize
         self.metric_directions: List[str] = []          # Metric optimization directions (minimize or maximize)
         self.study: Optional[optuna.Study] = None       # Optuna Study instace for optimization process
+        
         self.metadata: Dict[str, Any] = {
-            "study": None,              # name, storage, metric names, directions, pruner name, sampler name
-            "optimize": None,           # execution time, trials info, best trial(s) info
+            "study": None,      # name, storage, metric names, directions, pruner name, sampler name
+            "optimize": None,   # execution time, trials info, best trial(s) info
         }
         
         # Populate metric names and directions
@@ -194,7 +202,7 @@ class BaseOptunaOptimizer(abc.ABC):
         raise NotImplementedError()
 
     @abc.abstractmethod
-    def create_model(self, params: Dict[str, Any]) -> Any:
+    def create_model(self, suggestions: Dict[str, Any]) -> Any:
         """Creates and returns a model instance based on the suggested parameter values."""
         raise NotImplementedError()
 
@@ -448,3 +456,178 @@ class BaseOptunaOptimizer(abc.ABC):
         }
 
         logger.debug("[Finish] optimize()")
+
+
+class SklearnOptunaOptimizer(BaseOptunaOptimizer):
+    """
+    A custom optimizer for scikit-learn estimators using Optuna.
+
+    Parameters
+    ----------
+    params : List[OptunaParamSpec]
+        Hyperparameter specifications for the search space.
+    
+    metrics : Dict[str, str]
+        Mapping of metric names to optimization directions ("minimize" or "maximize").
+    
+    estimator : BaseEstimator
+        A scikit-learn estimator instance to optimize.
+    
+    cv : int, optional
+        The number of folds in a ``(Stratified)KFold`` for the cross-validation splitting strategy.
+        Default is 5.
+    
+    scoring : List[str], optional
+        List of strategies to evaluate the performance of the estimator across cross-validation splits 
+        (see [string name scorers](https://scikit-learn.org/stable/modules/model_evaluation.html#scoring-api-overview)). 
+        If None (default), the ``estimator``'s [default evaluation criterion](https://scikit-learn.org/stable/modules/model_evaluation.html#scoring-api-overview) is used.
+    
+    n_jobs : int, optional
+        Number of jobs to run in parallel. Training the estimator and computing the score are parallelized 
+        over the cross-validation splits. Default is 1 unless in a [``joblib.parallel_backend``](https://joblib.readthedocs.io/en/latest/generated/joblib.parallel_backend.html#joblib.parallel_backend) 
+        context. -1 means using all processors. See [Glossary](https://scikit-learn.org/stable/glossary.html#term-n_jobs) 
+        for more details.
+    """
+    def __init__(
+            self, 
+            params: List[OptunaParamSpec], 
+            metrics: Dict[str, str],
+            estimator: BaseEstimator,
+            *,
+            cv: int = 5,
+            scoring: Optional[List[str]] = None,
+            n_jobs: int = 1
+    ):
+        super().__init__(params, metrics)
+
+        # Validate the estimator class
+        if not issubclass(type(estimator), BaseEstimator):
+            raise ValueError(f"Estimator must be a subclass of 'sklearn.base.BaseEstimator'. Got: {type(estimator)}")
+
+        self.estimator: BaseEstimator = estimator
+        self.cv: int = cv
+        self.scoring: List[str] = scoring if scoring is not None else []
+        self.n_jobs: int = n_jobs
+
+    @property
+    def cv_results_(self) -> pandas.DataFrame:
+        df = pandas.DataFrame()
+        
+        if self.study is not None:
+            # Get the study trials as a DataFrame
+            df = self.study.trials_dataframe()
+
+            if not df.empty:
+                # Include the hyperparameters as a single dictionary column
+                param_names = [param.name for param in self.parameters]
+                df["params"] = df.apply(
+                    lambda row: {model_param: row["params_" + model_param] for model_param in param_names},
+                    axis=1
+                )
+
+                # Rename columns to remove "user_attrs_" prefix and replace "params_" prefix by "param_"
+                rename_mapping = {
+                    col_name: col_name.replace("user_attrs_", "")
+                    for col_name in df.columns
+                    if col_name.startswith("user_attrs_")
+                }
+                rename_mapping.update({
+                    "params_" + param_name: "param_" + param_name
+                    for param_name in param_names
+                })
+                df.rename(columns=rename_mapping, inplace=True)
+
+        return df
+
+
+    def supports_pruning(self) -> bool:
+        return hasattr(self.estimator, "partial_fit")
+
+    def create_model(self, suggestions: Dict[str, Any]) -> Any:
+        # New unfitted estimator with the same parameters
+        estimator_clone = sklearn_clone(self.estimator)
+
+        # Filter the suggested parameters to only include those that are valid for the estimator
+        valid_params = estimator_clone.get_params()
+        model_params = {
+            param_name: param_value 
+            for param_name, param_value in suggestions.items()
+            if param_name in valid_params
+        }
+
+        # Set the valid parameters to the cloned estimator
+        estimator_clone.set_params(**model_params)
+
+        return estimator_clone
+
+    # TODO: Implement (x_train, y_train, x_test, y_test)
+    def evaluate_model(self, model: Any) -> Dict[str, float]:
+        # TODO: Include logic for optional cross-validation. 
+        #       For instance, if the user provides a validation set, 
+        #       we can use it for evaluation instead of cross-validation.
+        
+        # Prepare the training, validation, and test data
+        x_train, y_train = self._train_data
+        x_val, y_val = self._val_data
+        x_test, y_test = self._test_data
+        
+        # If given validation data, join it with training data for cross-validation
+        if (x_val is not None) and (y_val is not None):
+            x_train = numpy.vstack([x_train, x_val])
+            y_train = numpy.hstack([y_train, y_val])
+        
+        # Join the objective metrics and the additional scoring metrics for evaluation
+        evaluate_scores = self.metric_names + self.scoring
+        
+        # Perform cross-validation
+        # Output is a mapping of evaluation name and array of scores (one per cross-validation split)
+        # Example: { "fit_time": [...], "score_time": [...], "test_<scorer>": [...], "train_<scorer>": [...] }
+        cv_scores: Dict[str, NDArray] = sklearn_cross_validate(
+            estimator=model,
+            X=x_train,
+            y=y_train,
+            scoring=evaluate_scores,
+            cv=self.cv,
+            n_jobs=self.n_jobs,
+            return_train_score=False,
+        )
+
+        # Format the cross-validation scores
+        # { "mean_<score_name>": <float>, "std_<score_name>": <float>, "split<i>_<score_name>": <float> }
+        train_metrics: Dict[str, float] = {}
+        for score_name, score_array in cv_scores.items():
+            # Change "test_" prefix to "val_"
+            if score_name.startswith("test_"):
+                score_name = score_name.replace("test_", "val_")
+
+            # Store individual split scores
+            # Example: "split0_val_accuracy", "split1_val_accuracy", ...
+            if score_name.startswith("val_") or score_name.startswith("train_"):
+                for idx, score_value in enumerate(score_array):
+                    metric_name = "split{}_{}".format(idx, score_name)
+                    train_metrics[metric_name] = float(score_value)
+
+            # Store the aggregated metrics: mean and std
+            train_metrics[f"mean_{score_name}"] = float(numpy.nanmean(score_array))
+            train_metrics[f"std_{score_name}"] = float(numpy.nanstd(score_array))
+
+        # Include the objective metrics with the correct name to report
+        # This won't be duplicated in the user attributes of the trial
+        objective_metrics: Dict[str, float] = {}
+        for metric_name in self.metric_names:
+            objective_metrics[metric_name] = train_metrics[f"mean_val_{metric_name}"]
+
+        # Include test data evaluation if provided
+        test_metrics: Dict[str, float] = {}
+        if (x_test is not None) and (y_test is not None):
+            # Fit the estimator on the full training data
+            model.fit(x_train, y_train)
+
+            # Compute and store each test score
+            for score_name in evaluate_scores:
+                score_func = sklearn_get_scorer(score_name)
+                test_score_value = score_func(model, x_test, y_test)
+                test_metrics[f"test_{score_name}"] = float(test_score_value)
+
+        return {**train_metrics, **objective_metrics, **test_metrics}
+
