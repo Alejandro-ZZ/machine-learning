@@ -1,29 +1,15 @@
 import abc
 import logging
 import time
-from dataclasses import dataclass
-
-import numpy
 import optuna
-import pandas
 
-from numpy.typing import NDArray
 from optuna.pruners import BasePruner
 from optuna.samplers import BaseSampler
-from sklearn.base import BaseEstimator
-from sklearn.base import clone as sklearn_clone
-from sklearn.base import is_classifier as sklearn_is_classifier
-from sklearn.metrics import get_scorer as sklearn_get_scorer
-from sklearn.model_selection import BaseCrossValidator
-from sklearn.model_selection import KFold
-from sklearn.model_selection import StratifiedKFold
-from sklearn.model_selection import cross_validate as sklearn_cross_validate
 from typing import (
     Any,
     Callable,
     Dict,
     List,
-    Mapping,
     Optional,
     Sequence,
     Tuple,
@@ -35,7 +21,9 @@ logger = logging.getLogger("OptunaOptimizer")
 
 
 
-# TODO: Model parameter dependencies logic and transformations as a module-level class thought for non-code users in a interactive optimization app.
+# TODO: 
+#   *   Model parameter dependencies logic and transformations as a module-level class 
+#       thought for non-code users in a interactive optimization app.
 class OptunaParamSpec:
     """
     Represents a hyperparameter specification for Optuna optimization.
