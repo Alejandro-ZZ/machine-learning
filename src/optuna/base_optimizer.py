@@ -115,7 +115,7 @@ class OptunaParamSpec:
         # Apply transformation function if provided
         if self.transform_fnc is not None:
             old_value = suggested_value
-            suggested_value = self.transform_fnc(trial, suggested_value)
+            suggested_value = self.transform_fnc(trial, suggested_value)    # TODO: Maybe is enough to pass only all the current suggested values
             logger.debug(f"Parameter '{self.name}' transformed: {old_value} --> {suggested_value}")
         
         return suggested_value
