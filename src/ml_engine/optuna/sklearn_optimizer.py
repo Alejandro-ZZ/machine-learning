@@ -23,8 +23,8 @@ from typing import (
     Set
 )
 
-from datasets.base_dataset import BaseDataset
-from optuna.base_optimizer import BaseOptunaOptimizer, OptunaParamSpec
+from ml_engine.datasets.base_dataset import BaseDataset
+from ml_engine.optuna.base_optimizer import BaseOptunaOptimizer, OptunaParamSpec
 
 
 logger = logging.getLogger("SklearnOptunaOptimizer")
