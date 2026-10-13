@@ -1,0 +1,17 @@
+[build-system]
+requires = ["hatchling >= 1.26"]
+build-backend = "hatchling.build"
+
+[project]
+name = "machine-learning-engine"
+version = "0.0.1"
+authors = [
+  { name="Alejandro Zambrano Z.", email="author@example.com" },
+]
+description = "Machine learning utility implementations"
+readme = "README.md"
+requires-python = ">=3.9"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+]
