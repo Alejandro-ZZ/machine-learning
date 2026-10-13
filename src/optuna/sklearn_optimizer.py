@@ -30,6 +30,12 @@ from optuna.base_optimizer import BaseOptunaOptimizer, OptunaParamSpec
 logger = logging.getLogger("SklearnOptunaOptimizer")
 
 
+# Dummy class to represent a scikit-learn estimator for type hinting purposes.
+class BaseFitEstimator(BaseEstimator):
+    def fit(self, X: ArrayLike, y: ArrayLike, **kwargs) -> Any:
+        raise NotImplementedError()
+
+
 class SklearnOptunaOptimizer(BaseOptunaOptimizer):
     """
     A custom optimizer for scikit-learn estimators using Optuna.
@@ -174,7 +180,7 @@ class SklearnOptunaOptimizer(BaseOptunaOptimizer):
 
         return evaluation_metrics
 
-    def _evaluate_holdout(self, model: BaseEstimator, suggestions: Dict[str, Any]) -> Dict[str, float]:
+    def _evaluate_holdout(self, model: BaseFitEstimator, suggestions: Dict[str, Any]) -> Dict[str, float]:
         """Evaluates the model using holdout validation data."""
         # Retrieve the training and validation data
         x_train, y_train = self.dataset.train_data(**suggestions)
