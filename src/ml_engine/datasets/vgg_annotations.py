@@ -13,10 +13,78 @@ from pathlib import Path
 from typing import Any, Dict, Optional, List
 
 
-class VGGImageAnnotations:
+class VggRegion:
+    """
+    A class to represent a single annotated region in an image, as defined by the VGG Image Annotator (VIA) tool.
+    The VGG format for a region is as::
+
+        region = {
+            "shape_attributes": {
+                "name": "rect",
+                "x": 100,
+                "y": 150,
+                "width": 200,
+                "height": 100
+            },
+
+            "region_attributes": {
+                "label": "cat",
+                "occluded": false
+            }
+        }
+
+    Parameters
+    ----------
+    shape : dict
+        Shape attributes of the region. It must contain a "name" key indicating the type of shape.
+        Common shapes include "rect", "circle", "ellipse", "polygon", "point", and "polyline".
+    
+    attrs : dict
+        Additional region attributes associated, such as labels or other metadata.
+    """
+    # Mapping of shape names to their required attributes
+    SHAPE_ATTRIBUTES = {
+        "rect": {"x", "y", "width", "height"},
+        "circle": {"cx", "cy", "r"},
+        "ellipse": {"cx", "cy", "rx", "ry", "theta"},
+        "polygon": {"all_points_x", "all_points_y"},
+        "point": {"cx", "cy"},
+        "polyline": {"all_points_x", "all_points_y"}
+    }
+
+    def __init__(self, shape: dict, attrs: dict):
+        self.shape = self.validate_shape(shape)
+        self.attributes = attrs
+
+    @staticmethod
+    def validate_shape(shape: dict) -> dict:
+        """Check and return a validated shape attributes of a region."""
+        # Name of shape (e.g., "rect", "circle", etc.)
+        shape_name = shape.get("name")
+        if not shape_name:
+            raise ValueError(f"Missing 'name' key in shape: {shape}")
+
+        # Valid shape name
+        if shape_name not in VggRegion.SHAPE_ATTRIBUTES:
+            raise ValueError(f"Unknown shape type '{shape_name}' in shape attributes: {shape}")
+
+        # Required attributes for the shape
+        required_attrs = VggRegion.SHAPE_ATTRIBUTES[shape_name]
+        
+        # Check for any missing required attributes in the provided shape attributes
+        missing_attrs = required_attrs - shape.keys()
+        if missing_attrs:
+            raise ValueError(f"Missing required attributes: {list(missing_attrs)}. Shape attributes: {shape}")
+
+        return shape
+
+
+
+class VggImageAnnotations:
     """
     A class to handle annotations from the VGG Image Annotator (VIA version 2) tool.
     """
+    # Required keys for a VIA project JSON file
     PROJECT_KEYS = { 
         "_via_settings", 
         "_via_img_metadata", 
