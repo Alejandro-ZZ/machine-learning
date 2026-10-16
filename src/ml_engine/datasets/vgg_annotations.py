@@ -7,9 +7,11 @@ References:
     * [VIA2 Utility Scripts](https://gitlab.com/vgg/via-suite/via/-/tree/master/via-2.x.y/scripts?ref_type=heads)
 
 """
+import shapely
 import warnings
 
 from pathlib import Path
+from shapely.geometry.base import BaseGeometry
 from typing import Any, Dict, Optional, List
 
 
@@ -53,30 +55,100 @@ class VggRegion:
     }
 
     def __init__(self, shape: dict, attrs: dict):
-        self.shape = self.validate_shape(shape)
+        self.shape = self.create_shape(shape)
         self.attributes = attrs
 
     @staticmethod
-    def validate_shape(shape: dict) -> dict:
+    def validate_attributes(shape_attributes: dict) -> dict:
         """Check and return a validated shape attributes of a region."""
         # Name of shape (e.g., "rect", "circle", etc.)
-        shape_name = shape.get("name")
+        shape_name = shape_attributes.get("name")
         if not shape_name:
-            raise ValueError(f"Missing 'name' key in shape: {shape}")
+            raise ValueError(f"Missing 'name' key in shape. Got: {shape_attributes}")
 
         # Valid shape name
         if shape_name not in VggRegion.SHAPE_ATTRIBUTES:
-            raise ValueError(f"Unknown shape type '{shape_name}' in shape attributes: {shape}")
+            raise ValueError(
+                f"Unsupported shape name '{shape_name}'. "
+                f"Possible values: {list(VggRegion.SHAPE_ATTRIBUTES.keys())}"
+            )
 
         # Required attributes for the shape
         required_attrs = VggRegion.SHAPE_ATTRIBUTES[shape_name]
         
         # Check for any missing required attributes in the provided shape attributes
-        missing_attrs = required_attrs - shape.keys()
+        missing_attrs = required_attrs - shape_attributes.keys()
         if missing_attrs:
-            raise ValueError(f"Missing required attributes: {list(missing_attrs)}. Shape attributes: {shape}")
+            raise ValueError(f"Missing required attributes: {list(missing_attrs)}. Shape attributes: {shape_attributes}")
 
-        return shape
+        return shape_attributes
+    
+    @staticmethod
+    def create_shape(shape_attributes: dict) -> BaseGeometry:
+        """
+        Create a Shapely geometric object based on the provided shape attributes.
+
+        Parameters
+        ----------
+        shape_attributes : dict
+            Dictionary containing the shape attributes from VGG annotations.
+
+        Returns
+        -------
+        shapely.geometry.base.BaseGeometry
+            A Shapely geometric object corresponding to the specified shape.
+        """
+        # Created shape
+        geometry: BaseGeometry
+
+        # Validate the shape attributes
+        shape_attributes = VggRegion.validate_attributes(shape_attributes)
+        shape_name: str = shape_attributes["name"]
+
+        if shape_name == "rect":
+            x = shape_attributes["x"]
+            y = shape_attributes["y"]
+            width = shape_attributes["width"]
+            height = shape_attributes["height"]
+            geometry = shapely.geometry.box(x, y, x + width, y + height)
+
+        elif shape_name == "circle":
+            cx = shape_attributes["cx"]
+            cy = shape_attributes["cy"]
+            r = shape_attributes["r"]
+            geometry = shapely.geometry.Point(cx, cy).buffer(r)
+
+        # TODO: Check theta rotation for ellipse foor compatibility with VGG annotations
+        elif shape_name == "ellipse":
+            cx = shape_attributes["cx"]
+            cy = shape_attributes["cy"]
+            rx = shape_attributes["rx"]
+            ry = shape_attributes["ry"]
+            theta = shape_attributes.get("theta", 0)
+            circle = shapely.geometry.Point(cx, cy).buffer(1)
+            ellipse = shapely.affinity.scale(circle, rx, ry)
+            geometry = shapely.affinity.rotate(ellipse, theta)
+
+        elif shape_name == "point":
+            cx = shape_attributes["cx"]
+            cy = shape_attributes["cy"]
+            geometry = shapely.geometry.Point(cx, cy)
+
+        elif shape_name == "polygon":
+            all_points_x = shape_attributes["all_points_x"]
+            all_points_y = shape_attributes["all_points_y"]
+            geometry = shapely.geometry.Polygon(zip(all_points_x, all_points_y))
+
+        elif shape_name == "polyline":
+            all_points_x = shape_attributes["all_points_x"]
+            all_points_y = shape_attributes["all_points_y"]
+            geometry = shapely.geometry.LineString(zip(all_points_x, all_points_y))
+
+        else:
+            raise ValueError(f"Unknown shape type '{shape_name}' in VGG annotations.")
+
+        return geometry
+    
 
 
 
@@ -129,6 +201,7 @@ class VggImageAnnotations:
 
 
     def check_images_metadata(self, annotations: dict) -> Dict[str, dict]:
+        """Check and return the image metadata from the provided annotations."""
         images_metadata: Dict[str, dict]
         if "_via_img_metadata" in annotations:
                 # If the annotations are from a project, we extract the image metadata from the "_via_img_metadata" key.
@@ -159,3 +232,7 @@ class VggImageAnnotations:
                 warnings.warn(f"Image '{image_name}' has no annotations (empty 'regions').")
             
         return images_metadata
+
+
+
+
