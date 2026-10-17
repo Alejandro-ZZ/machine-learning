@@ -7,13 +7,15 @@ References:
     * [VIA2 Utility Scripts](https://gitlab.com/vgg/via-suite/via/-/tree/master/via-2.x.y/scripts?ref_type=heads)
 
 """
+import numpy
 import shapely
 import warnings
 
 from numpy.typing import NDArray
 from pathlib import Path
 from shapely.geometry.base import BaseGeometry
-from typing import Any, Dict, Optional, List
+from skimage import draw
+from typing import Any, Dict, Optional, List, Tuple
 
 
 class VggRegion:
@@ -143,12 +145,81 @@ class VggRegion:
 
         return geometry
 
-    def pixel_coordinates(self) -> NDArray:
+    def pixel_coordinates(self, image_shape: Optional[tuple]) -> Tuple[NDArray, ...]:
         """
         Generate coordinates of all pixels contained within the region, based on its shape.
-        """
-        pass
+        Output coordinates are in (row, col) format for NumPy indexing::
 
+            rows, cols = region.pixel_coordinates(image_shape)
+            image[rows, cols] = 1  # Set pixels inside the region to 1
+
+        Parameters
+        ----------
+        image_shape : tuple, optional
+            The shape of the image (height, width). This is used to ensure that the generated 
+            pixel coordinates do not exceed the image boundaries.
+
+        Returns
+        -------
+        Tuple[NDArray, ...]
+            A tuple of NumPy arrays representing the row and column indices of the pixels 
+            contained within the region. The first array corresponds to row indices, and 
+            the second array corresponds to column indices.
+        """
+        # Get the shape name
+        shape_name: str = self.shape_attrs["name"]
+
+        # Coordinates of pixels as (row, col) format for NumPy indexing
+        output_coords: Tuple[NDArray, ...]
+
+        if shape_name == "rect":
+            x = self.shape_attrs["x"]
+            y = self.shape_attrs["y"]
+            width = self.shape_attrs["width"]
+            height = self.shape_attrs["height"]
+            output_coords = draw.rectangle(start=(y, x), extent=(height, width), shape=image_shape)
+
+        elif shape_name == "circle":
+            cx = self.shape_attrs["cx"]
+            cy = self.shape_attrs["cy"]
+            r = self.shape_attrs["r"]
+            output_coords = draw.disk(center=(cy, cx), radius=r, shape=image_shape)
+
+        elif shape_name == "ellipse":
+            cx = self.shape_attrs["cx"]
+            cy = self.shape_attrs["cy"]
+            rx = self.shape_attrs["rx"]
+            ry = self.shape_attrs["ry"]
+            theta = self.shape_attrs.get("theta", 0)
+            output_coords = draw.ellipse(r=cx, c=cy, r_radius=rx, c_radius=ry, rotation=theta, shape=image_shape)
+
+        elif shape_name == "point":
+            cx = self.shape_attrs["cx"]
+            cy = self.shape_attrs["cy"]
+            output_coords = draw.disk(center=(cy, cx), radius=1, shape=image_shape)
+
+        elif shape_name == "polygon":
+            all_points_x = self.shape_attrs["all_points_x"]
+            all_points_y = self.shape_attrs["all_points_y"]
+            output_coords = draw.polygon(r=all_points_y, c=all_points_x, shape=image_shape)
+
+        elif shape_name == "polyline":
+            all_points_x = self.shape_attrs["all_points_x"]
+            all_points_y = self.shape_attrs["all_points_y"]
+            rr_list: List[NDArray] = []
+            cc_list: List[NDArray] = []
+            for i in range(len(all_points_x) - 1):
+                r0, c0 = all_points_y[i], all_points_x[i]
+                r1, c1 = all_points_y[i + 1], all_points_x[i + 1]
+                rr, cc = draw.line(r0=r0, c0=c0, r1=r1, c1=c1)
+                rr_list.append(rr)
+                cc_list.append(cc)
+            output_coords = (numpy.concatenate(rr_list), numpy.concatenate(cc_list))
+                
+        else:
+            raise ValueError(f"Unknown shape type '{shape_name}' in VGG annotations.")
+
+        return output_coords
 
 
 class VggImageAnnotations:
