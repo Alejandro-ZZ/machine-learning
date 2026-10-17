@@ -15,6 +15,7 @@ import warnings
 
 from numpy.typing import NDArray
 from pathlib import Path
+from scipy.spatial import KDTree
 from shapely.geometry.base import BaseGeometry
 from skimage import draw, io
 from typing import Any, Dict, Optional, List, Self, Tuple, Union
@@ -174,7 +175,7 @@ class VggRegion:
     # TODO: 
     #   Optionally resample the pixel coordinates based on desired distance to 
     #   reduce the number of points for large regions.
-    def pixel_coordinates(self, image_shape: Optional[tuple]) -> Tuple[NDArray, ...]:
+    def pixel_coordinates(self, image_shape: Optional[tuple] = None, distance: Optional[float] = None) -> Tuple[NDArray, ...]:
         """
         Generate coordinates of all pixels contained within the region, based on its shape.
         Output coordinates are in (row, col) format for NumPy indexing::
@@ -187,6 +188,9 @@ class VggRegion:
         image_shape : tuple, optional
             The shape of the image (height, width). This is used to ensure that the generated 
             pixel coordinates do not exceed the image boundaries.
+        
+        distance : float, optional
+            If provided, this parameter specifies the minimum distance between points.
 
         Returns
         -------
@@ -247,6 +251,23 @@ class VggRegion:
                 
         else:
             raise ValueError(f"Unknown shape type '{shape_name}' in VGG annotations.")
+
+
+        # TODO: Under implementation
+        if (distance is not None) and (shape_name not in {"point", "polyline"}):
+            points_arr = numpy.column_stack(output_coords)
+            tree = KDTree(data=points_arr)
+            keep = numpy.ones(len(points_arr), bool)
+            result = []
+            for idx, coordinate in enumerate(points_arr):
+                if keep[idx]:
+                    # mark all neighbors within "distance" as “excluded”
+                    result.append(coordinate)
+                    ids = tree.query_ball_point(coordinate, distance)
+                    keep[ids] = False
+
+            result = numpy.array(result)
+            output_coords = (result[:, 0], result[:, 1])
 
         return output_coords
 
