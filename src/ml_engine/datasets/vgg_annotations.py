@@ -9,13 +9,14 @@ References:
 """
 import json
 import numpy
+import pandas
 import shapely
 import warnings
 
 from numpy.typing import NDArray
 from pathlib import Path
 from shapely.geometry.base import BaseGeometry
-from skimage import draw
+from skimage import draw, io
 from typing import Any, Dict, Optional, List, Self, Tuple, Union
 
 
@@ -86,7 +87,31 @@ class VggRegion:
             raise ValueError(f"Missing required attributes: {list(missing_attrs)}. Shape attributes: {shape_attributes}")
 
         return shape_attributes
-    
+
+    def combine_attributes(self) -> dict:
+        """
+        Combine shape attributes and region attributes into a single dictionary.
+
+        Returns
+        -------
+        dict
+            A dictionary containing both shape and region attributes::
+            
+                {
+                    "name": "rect",
+                    "x": 100,
+                    "y": 150,
+                    "width": 200,
+                    "height": 100,
+
+                    "label": "cat",
+                    "occluded": false
+                }
+        """
+        combined_attrs = self.shape_attrs.copy()
+        combined_attrs.update(self.region_attrs)
+        return combined_attrs
+
     def geometry(self) -> BaseGeometry:
         """
         Create a Shapely geometric object based on the shape attributes.
@@ -146,6 +171,9 @@ class VggRegion:
 
         return geometry
 
+    # TODO: 
+    #   Optionally resample the pixel coordinates based on desired distance to 
+    #   reduce the number of points for large regions.
     def pixel_coordinates(self, image_shape: Optional[tuple]) -> Tuple[NDArray, ...]:
         """
         Generate coordinates of all pixels contained within the region, based on its shape.
@@ -279,10 +307,11 @@ class VggImageAnnotations:
 
             "_via_img_metadata": {
                 "<image_filename>": {
+                    "filename": <string>,       <-- Image filename
                     "size": <int>,              <-- Image size in bytes
                     "regions": [ ... ],         <-- List of annotated regions. See ``VggRegion`` for structure details
-                    "file_attributes": { ... }
-                    "id": <string>,             <-- Original image ID
+                    "file_attributes": { ... }, <-- File-level attributes
+                    "id": <string>,             <-- VGG image ID: <filename><size>
                 },
                 ...
             }
@@ -342,6 +371,19 @@ class VggImageAnnotations:
             annotations = json.load(f)
         return cls(annotations, base_path, is_project="_via_img_metadata" in annotations)
 
+    def to_json(self, filepath: Union[str, Path]):
+        """Save the current annotations to a JSON file."""
+        filepath = Path(filepath)
+        data_to_save = {
+            "_via_settings": self.settings,
+            "_via_img_metadata": self.images_metadata,
+            "_via_attributes": self.attributes,
+            "_via_data_format_version": self.data_version,
+            "_via_image_id_list": self.image_ids
+        }
+        with filepath.open(mode="w", encoding="utf-8") as f:
+            json.dump(data_to_save, f, indent=4)
+
     def check_images_metadata(self, annotations: dict) -> Dict[str, dict]:
         """
         Check and return the image metadata from the provided annotations.
@@ -373,7 +415,7 @@ class VggImageAnnotations:
                 raise ValueError(f"Missing 'filename' key in image metadata: {image_data}")
 
             # Get image annotation data
-            image_filename = image_data.pop("filename")
+            image_filename = image_data["filename"]
             image_regions = image_data["regions"]
 
             # Check if the image file exists in the base path
@@ -430,5 +472,57 @@ class VggImageAnnotations:
                 self.images_metadata[other_filename] = other_metadata
 
 
+
+def vgg_to_dataframe(vgg_annotations: VggImageAnnotations) -> pandas.DataFrame:
+    """
+    Convert VGG annotations to a pandas DataFrame.
+    Each row corresponds to a region in the VGG annotations, with columns: 
+    
+        * Filename: The name of the image file.
+        * VggShape: The shape type of the region (e.g., "rect", "circle", etc.) concatenated with the region ID.
+        * Cx: The x-coordinate of the pixel (column index).
+        * Cy: The y-coordinate of the pixel (row index).
+        * Additional columns are added for each region attribute found across all regions.
+    """
+    df_rows: List[dict] = []    
+    region_attrs = set()
+
+    # Iterate over each image in the annotations
+    for image_metadata in vgg_annotations.images_metadata.values():
+        
+        # Get image shape
+        image_file = vgg_annotations.base_path / image_metadata["filename"]
+        image_shape = io.imread(image_file).shape
+        
+        # Iterate over each region in the image
+        for region_id, region_data in enumerate(image_metadata["regions"], start=1):
+            # Create an instance of VggRegion
+            vgg_region = VggRegion(
+                shape_attrs=region_data["shape_attributes"], 
+                region_attrs=region_data["region_attributes"]
+            )
+
+            # Add the region attributes to the set
+            region_attrs.update(vgg_region.region_attrs.keys())
+
+            # Get pixel coordinates
+            rows, cols = vgg_region.pixel_coordinates(image_shape=image_shape)
+
+            # Create a row for the DataFrame
+            for row, col in zip(rows, cols):
+                df_row = {
+                    "Filename": image_metadata["filename"],
+                    "VggShape": vgg_region.shape_attrs["name"] + str(region_id),
+                    "Cx": int(col),
+                    "Cy": int(row),
+                    **vgg_region.region_attrs
+                }
+                df_rows.append(df_row)
+
+    # Create the DataFrame from the list of rows
+    df = pandas.DataFrame(data=df_rows)
+
+    print(f"Region attributes found: {list(region_attrs)}")
+    return df
 
 
