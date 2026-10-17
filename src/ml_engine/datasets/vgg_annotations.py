@@ -7,6 +7,7 @@ References:
     * [VIA2 Utility Scripts](https://gitlab.com/vgg/via-suite/via/-/tree/master/via-2.x.y/scripts?ref_type=heads)
 
 """
+import json
 import numpy
 import shapely
 import warnings
@@ -15,7 +16,7 @@ from numpy.typing import NDArray
 from pathlib import Path
 from shapely.geometry.base import BaseGeometry
 from skimage import draw
-from typing import Any, Dict, Optional, List, Tuple
+from typing import Any, Dict, Optional, List, Tuple, Union
 
 
 class VggRegion:
@@ -276,15 +277,15 @@ class VggImageAnnotations:
         A list of image IDs present in the annotations.
     
     images_metadata : Dict[str, dict]
-        Information about all images and their associated metadata. Each image is indexed using a unique key: 
-        FILENAME-FILESIZE and contains the following information::
-        
+        Information about all images and their associated metadata. Each image is indexed using the filename 
+        and contains the following information::
+
             "_via_img_metadata": {
-                "<image_id>": {
-                    "filename": <string>,
+                "<image_filename>": {
                     "size": <int>,              <-- Image size in bytes
                     "regions": [ ... ],         <-- List of annotated regions. See ``VggRegion`` for structure details
                     "file_attributes": { ... }
+                    "id": <string>,             <-- Original image ID
                 },
                 ...
             }
@@ -324,26 +325,51 @@ class VggImageAnnotations:
         self.image_ids: List[str] = annotations.get("_via_image_id_list", [])
 
         # Information about all images and their associated metadata
-        # Each image is indexed using a unique key: FILENAME-FILESIZE and contains the following information:
-        #   * "filename": The name of the image file.
-        #   * "size": The size of the image file in bytes.
-        #   * "regions": A list of regions (annotations) associated with the image.
-        #   * "file_attributes": A dictionary of additional attributes related to the image file.
         self.images_metadata: Dict[str, dict] = self.check_images_metadata(annotations)
 
+    @classmethod
+    def from_json(cls, filepath: Union[str, Path], base_path: Union[str, Path]) -> "VggImageAnnotations":
+        """
+        Create a VggImageAnnotations instance from a JSON file.
+
+        Parameters
+        ----------
+        filepath : str | Path
+            The path to the JSON file containing the annotations.
+        
+        base_path : str | Path
+            The base path to the directory containing the annotated image files.
+        """
+        filepath = Path(filepath)
+        base_path = Path(base_path)
+        with filepath.open(mode="r", encoding="utf-8") as f:
+            annotations = json.load(f)
+        return cls(annotations, base_path, is_project="_via_img_metadata" in annotations)
 
     def check_images_metadata(self, annotations: dict) -> Dict[str, dict]:
-        """Check and return the image metadata from the provided annotations."""
-        images_metadata: Dict[str, dict]
+        """
+        Check and return the image metadata from the provided annotations.
+        
+        Notes
+        -----
+        *   Raw metadata is extracted from the "_via_img_metadata" key if present, 
+            otherwise it is assumed to be directly the image metadata.
+        
+        *   The returned metadata change the structure to be indexed by image filename 
+            instead of the original image ID. 
+        """
+        raw_metadata: Dict[str, dict]
+        new_metadata: Dict[str, dict] = {}
+
         if "_via_img_metadata" in annotations:
                 # If the annotations are from a project, we extract the image metadata from the "_via_img_metadata" key.
-                images_metadata = annotations["_via_img_metadata"]
+                raw_metadata = annotations["_via_img_metadata"]
         else:
             # If the annotations are not from a project, we assume they are directly the image metadata.
-            images_metadata = annotations
+            raw_metadata = annotations
 
         # Annotated files sanity check
-        for image_data in images_metadata.values():
+        for image_id, image_data in raw_metadata.items():
             # Check for required keys
             if "regions" not in image_data:
                 raise ValueError(f"Missing 'regions' key in image metadata: {image_data}")
@@ -351,19 +377,25 @@ class VggImageAnnotations:
                 raise ValueError(f"Missing 'filename' key in image metadata: {image_data}")
 
             # Get image annotation data
-            image_name = image_data["filename"]
+            image_filename = image_data.pop("filename")
             image_regions = image_data["regions"]
 
             # Check if the image file exists in the base path
-            image_file = self.base_path / image_name
+            image_file = self.base_path / image_filename
             if not image_file.exists():
-                raise FileNotFoundError(f"Image file not found. Name: '{image_name}', Path: '{image_file}'")
+                raise FileNotFoundError(f"Image file not found. Name: '{image_filename}', Path: '{image_file}'")
 
             # Warn for empty annotations
             if not image_regions:
-                warnings.warn(f"Image '{image_name}' has no annotations (empty 'regions').")
-            
-        return images_metadata
+                warnings.warn(f"Image '{image_filename}' has no annotations (empty 'regions').")
+
+            # Store the original image ID for reference
+            image_data["id"] = image_id
+
+            # Add the image data to the new metadata
+            new_metadata[image_filename] = image_data
+
+        return new_metadata
 
 
 
