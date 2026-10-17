@@ -10,6 +10,7 @@ References:
 import shapely
 import warnings
 
+from numpy.typing import NDArray
 from pathlib import Path
 from shapely.geometry.base import BaseGeometry
 from typing import Any, Dict, Optional, List
@@ -37,11 +38,11 @@ class VggRegion:
 
     Parameters
     ----------
-    shape : dict
+    shape_attrs : dict
         Shape attributes of the region. It must contain a "name" key indicating the type of shape.
         Common shapes include "rect", "circle", "ellipse", "polygon", "point", and "polyline".
     
-    attrs : dict
+    region_attrs : dict
         Additional region attributes associated, such as labels or other metadata.
     """
     # Mapping of shape names to their required attributes
@@ -54,9 +55,9 @@ class VggRegion:
         "polyline": {"all_points_x", "all_points_y"}
     }
 
-    def __init__(self, shape: dict, attrs: dict):
-        self.shape = self.create_shape(shape)
-        self.attributes = attrs
+    def __init__(self, shape_attrs: dict, region_attrs: dict):
+        self.shape_attrs = self.validate_attributes(shape_attrs)
+        self.region_attrs = region_attrs
 
     @staticmethod
     def validate_attributes(shape_attributes: dict) -> dict:
@@ -83,15 +84,9 @@ class VggRegion:
 
         return shape_attributes
     
-    @staticmethod
-    def create_shape(shape_attributes: dict) -> BaseGeometry:
+    def geometry(self) -> BaseGeometry:
         """
-        Create a Shapely geometric object based on the provided shape attributes.
-
-        Parameters
-        ----------
-        shape_attributes : dict
-            Dictionary containing the shape attributes from VGG annotations.
+        Create a Shapely geometric object based on the shape attributes.
 
         Returns
         -------
@@ -101,60 +96,127 @@ class VggRegion:
         # Created shape
         geometry: BaseGeometry
 
-        # Validate the shape attributes
-        shape_attributes = VggRegion.validate_attributes(shape_attributes)
-        shape_name: str = shape_attributes["name"]
+        # Get the shape name
+        shape_name: str = self.shape_attrs["name"]
 
         if shape_name == "rect":
-            x = shape_attributes["x"]
-            y = shape_attributes["y"]
-            width = shape_attributes["width"]
-            height = shape_attributes["height"]
+            x = self.shape_attrs["x"]
+            y = self.shape_attrs["y"]
+            width = self.shape_attrs["width"]
+            height = self.shape_attrs["height"]
             geometry = shapely.geometry.box(x, y, x + width, y + height)
 
         elif shape_name == "circle":
-            cx = shape_attributes["cx"]
-            cy = shape_attributes["cy"]
-            r = shape_attributes["r"]
+            cx = self.shape_attrs["cx"]
+            cy = self.shape_attrs["cy"]
+            r = self.shape_attrs["r"]
             geometry = shapely.geometry.Point(cx, cy).buffer(r)
 
         # TODO: Check theta rotation for ellipse foor compatibility with VGG annotations
         elif shape_name == "ellipse":
-            cx = shape_attributes["cx"]
-            cy = shape_attributes["cy"]
-            rx = shape_attributes["rx"]
-            ry = shape_attributes["ry"]
-            theta = shape_attributes.get("theta", 0)
+            cx = self.shape_attrs["cx"]
+            cy = self.shape_attrs["cy"]
+            rx = self.shape_attrs["rx"]
+            ry = self.shape_attrs["ry"]
+            theta = self.shape_attrs.get("theta", 0)
             circle = shapely.geometry.Point(cx, cy).buffer(1)
             ellipse = shapely.affinity.scale(circle, rx, ry)
             geometry = shapely.affinity.rotate(ellipse, theta)
 
         elif shape_name == "point":
-            cx = shape_attributes["cx"]
-            cy = shape_attributes["cy"]
+            cx = self.shape_attrs["cx"]
+            cy = self.shape_attrs["cy"]
             geometry = shapely.geometry.Point(cx, cy)
 
         elif shape_name == "polygon":
-            all_points_x = shape_attributes["all_points_x"]
-            all_points_y = shape_attributes["all_points_y"]
+            all_points_x = self.shape_attrs["all_points_x"]
+            all_points_y = self.shape_attrs["all_points_y"]
             geometry = shapely.geometry.Polygon(zip(all_points_x, all_points_y))
 
         elif shape_name == "polyline":
-            all_points_x = shape_attributes["all_points_x"]
-            all_points_y = shape_attributes["all_points_y"]
+            all_points_x = self.shape_attrs["all_points_x"]
+            all_points_y = self.shape_attrs["all_points_y"]
             geometry = shapely.geometry.LineString(zip(all_points_x, all_points_y))
 
         else:
             raise ValueError(f"Unknown shape type '{shape_name}' in VGG annotations.")
 
         return geometry
-    
+
+    def pixel_coordinates(self) -> NDArray:
+        """
+        Generate coordinates of all pixels contained within the region, based on its shape.
+        """
+        pass
 
 
 
 class VggImageAnnotations:
     """
     A class to handle annotations from the VGG Image Annotator (VIA version 2) tool.
+
+    Attributes
+    ----------
+    raw_annotations : dict
+        The original annotations exported from the VIA JSON file.
+
+    base_path : Path
+        The base path to the directory containing the annotated files.
+    
+    settings : dict
+        Settings used by the VIA application, extracted from the annotations::
+        
+            "_via_settings": {
+                "ui": { ... },
+
+                "core": {
+                    filepath: { ... },          <-- Mapping of search filepath to integer ID
+                    default_filepath: <string>, <-- Default search filepath
+                },
+                
+                "project": { "name": <string> }
+            }    
+    
+    attributes : dict
+        Attributes that can be attached to image ("file") and its regions ("region"). Each attribute is 
+        defined as a dictionary::
+        
+            "_via_attributes": {
+                "region": {
+                    <attribute_name>: {
+                        "type": <string>,           <-- "text", "checkbox", "radio", "image", "dropdown"
+                        "description": <string>,
+                        
+                        "options": { ... },         <-- Mapping of option ID and description (omitted for "text" type)
+                        "default_options": { ... }, <-- Mapping of default option ID and description (omitted for "text" type)
+    
+                        "default_value": <string>,  <-- Default value for "text" type attributes only
+                    },
+                    ...
+                },
+
+                "file": { ... }     <-- Same structure as "region" attributes, but for file-level attributes
+            }
+        
+    data_version : str
+        Data format version of the annotations, e.g., "2.0.0".
+        
+    image_ids : List[str]
+        A list of image IDs present in the annotations.
+    
+    images_metadata : Dict[str, dict]
+        Information about all images and their associated metadata. Each image is indexed using a unique key: 
+        FILENAME-FILESIZE and contains the following information::
+        
+            "_via_img_metadata": {
+                "<image_id>": {
+                    "filename": <string>,
+                    "size": <int>,              <-- Image size in bytes
+                    "regions": [ ... ],         <-- List of annotated regions. See ``VggRegion`` for structure details
+                    "file_attributes": { ... }
+                },
+                ...
+            }
     """
     # Required keys for a VIA project JSON file
     PROJECT_KEYS = { 
@@ -182,7 +244,6 @@ class VggImageAnnotations:
         self.settings: Dict[str, Any] = annotations.get("_via_settings", {})
 
         # Attributes that can be attached to image and its regions
-        # This defines the types of attributes that can be associated with images and their regions (annotations).
         self.attributes: Dict[str, Any] = annotations.get("_via_attributes", {})
 
         # Data format version of the annotations
