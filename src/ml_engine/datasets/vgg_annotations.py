@@ -16,7 +16,7 @@ from numpy.typing import NDArray
 from pathlib import Path
 from shapely.geometry.base import BaseGeometry
 from skimage import draw
-from typing import Any, Dict, Optional, List, Tuple, Union
+from typing import Any, Dict, Optional, List, Self, Tuple, Union
 
 
 class VggRegion:
@@ -229,9 +229,6 @@ class VggImageAnnotations:
 
     Attributes
     ----------
-    raw_annotations : dict
-        The original annotations exported from the VIA JSON file.
-
     base_path : Path
         The base path to the directory containing the annotated files.
     
@@ -308,8 +305,7 @@ class VggImageAnnotations:
             if missing_keys:
                 raise ValueError(f"Missing project keys in annotations: {missing_keys}. Got: {list(annotations.keys())}")
 
-        # Store the raw annotations and the base path for the images
-        self.raw_annotations = annotations
+        # Store the base path for the images
         self.base_path = base_path
 
         # Settings used by the VIA application
@@ -396,6 +392,42 @@ class VggImageAnnotations:
             new_metadata[image_filename] = image_data
 
         return new_metadata
+
+    def merge(self, other: "VggImageAnnotations"):
+        """
+        Merge another VggImageAnnotations instance into this one.
+
+        Parameters
+        ----------
+        other : VggImageAnnotations
+            Another instance of VggImageAnnotations to merge with this one.
+        """
+        # Merge the settings, attributes, and data version
+        self.settings.update(other.settings)
+        self.attributes.update(other.attributes)
+        self.data_version = max(self.data_version, other.data_version)
+
+        # Merge the image IDs
+        self.image_ids.extend(other.image_ids)
+
+        # Merge the images metadata (include both existing and new images)
+        for other_filename, other_metadata in other.images_metadata.items():
+            if other_filename in self.images_metadata:
+                warnings.warn(
+                    f"Image '{other_filename}' already exists in the current annotations. " 
+                    f"Merging regions and file attributes."
+                )
+
+                # Merge regions for existing images
+                image_regions: List[dict] = self.images_metadata[other_filename]["regions"]
+                image_regions.extend(other_metadata["regions"])
+
+                # Merge file attributes for existing images
+                file_attributes: Dict[str, Any] = self.images_metadata[other_filename]["file_attributes"]
+                file_attributes.update(other_metadata["file_attributes"])
+            else:
+                # If the image is new, add it to the metadata
+                self.images_metadata[other_filename] = other_metadata
 
 
 
