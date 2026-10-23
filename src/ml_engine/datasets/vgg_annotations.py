@@ -8,6 +8,8 @@ References:
 
 """
 import json
+import math
+import matplotlib.pyplot as plt
 import numpy
 import pandas
 import shapely
@@ -20,6 +22,47 @@ from shapely.geometry.base import BaseGeometry
 from skimage import draw, io
 from typing import Any, Dict, Optional, List, Self, Tuple, Union
 
+
+# TODO: Debugging code for testing the VggRegion class
+"""
+import matplotlib.pyplot as plt
+from src.ml_engine.datasets.vgg_annotations import *
+from shapely.plotting import plot_polygon, plot_line, plot_points
+
+test_attrs = {
+    "rect": {"name": "rect", "x": 20, "y": 30, "width": 50, "height": 100},
+    "circle": {"name": "circle", "cx": 50, "cy": 50, "r": 30},
+    "ellipse": {"name": "ellipse", "cx": 100, "cy": 100, "rx": 50, "ry": 30, "theta": 45},
+    "polygon": {"name": "polygon", "all_points_x": [10, 20, 30], "all_points_y": [10, 20, 10]},
+    "point": {"name": "point", "cx": 50, "cy": 50},
+    "polyline": {"name": "polyline", "all_points_x": [10, 20, 30], "all_points_y": [10, 20, 10]}
+}
+
+def test_region(region, distance=10):
+    geometry = region.geometry()
+    coords = region.pixel_coordinates(distance=None)
+    coords2 = region.pixel_coordinates(distance=distance)
+    #
+    if geometry.geom_type == "Polygon":
+        plot_polygon(region.geometry(), color="green", label="Geometry")
+    elif geometry.geom_type == "LineString":
+        plot_line(region.geometry(), color="green", label="Geometry")
+    elif geometry.geom_type == "Point":
+        plot_points(region.geometry(), color="green", label="Geometry")
+    plt.scatter(coords[1], coords[0], color="blue", label="All Pixels")
+    plt.scatter(coords2[1], coords2[0], color="red", label=f"Sparsed (d={distance})")
+    #
+    plt.legend()
+    plt.title(str(region.shape_attrs))
+    # plt.xlim(0, 200); plt.ylim(0, 200)
+    plt.show()
+
+# rect, circle, ellipse, polygon, point, polyline
+region = VggRegion(shape_attrs=test_attrs["rect"], region_attrs={})
+region.pixel_coordinates(distance=3)
+test_region(region, distance=5)
+
+"""
 
 class VggRegion:
     """
@@ -116,6 +159,25 @@ class VggRegion:
     def geometry(self) -> BaseGeometry:
         """
         Create a Shapely geometric object based on the shape attributes.
+
+        Notes
+        -----
+        Geometries can be plotted with matplotlib using the ``shapely.plotting`` module::
+            
+            import matplotlib.pyplot as plt
+            from shapely.plotting import plot_polygon, plot_line, plot_points
+
+            region = VggRegion(shape_attrs=shape_attrs, region_attrs=region_attrs)
+            geom = region.geometry()
+
+            if geom.geom_type == "Polygon":
+                plot_polygon(geom)
+            elif geom.geom_type == "LineString":
+                plot_line(geom)
+            elif geom.geom_type == "Point":
+                plot_points(geom)
+
+            plt.show()
 
         Returns
         -------
@@ -223,7 +285,7 @@ class VggRegion:
             cy = self.shape_attrs["cy"]
             rx = self.shape_attrs["rx"]
             ry = self.shape_attrs["ry"]
-            theta = self.shape_attrs.get("theta", 0)
+            theta = math.radians(self.shape_attrs.get("theta", 0))
             output_coords = draw.ellipse(r=cx, c=cy, r_radius=rx, c_radius=ry, rotation=theta, shape=image_shape)
 
         elif shape_name == "point":
@@ -254,20 +316,31 @@ class VggRegion:
 
 
         # TODO: Under implementation
+        # import pdb; pdb.set_trace()
         if (distance is not None) and (shape_name not in {"point", "polyline"}):
             points_arr = numpy.column_stack(output_coords)
-            tree = KDTree(data=points_arr)
-            keep = numpy.ones(len(points_arr), bool)
+            tree = KDTree(data=points_arr)  # Expected data shape: (n_pixels, 2) for 2D coordinates
+            remaining = set(range(len(points_arr)))
             result = []
-            for idx, coordinate in enumerate(points_arr):
-                if keep[idx]:
-                    # mark all neighbors within "distance" as “excluded”
-                    result.append(coordinate)
-                    ids = tree.query_ball_point(coordinate, distance)
-                    keep[ids] = False
+            while remaining:
+                point_idx = remaining.pop()
+                coordinate = points_arr[point_idx]
+                result.append(coordinate)
+                ids = tree.query_ball_point(coordinate, distance)
+                remaining.difference_update(ids)
 
             result = numpy.array(result)
+            
+            # TODO: DEBUG ONLY
+            plt.figure()
+            plt.scatter(points_arr[:, 1], points_arr[:, 0], alpha=0.3, )
+            plt.scatter(result[:, 1], result[:, 0], c="green") # marker='^'
+            plt.title(f"Distance: {distance}")
+            plt.show()
+            import pdb; pdb.set_trace()
+
             output_coords = (result[:, 0], result[:, 1])
+
 
         return output_coords
 
@@ -545,5 +618,4 @@ def vgg_to_dataframe(vgg_annotations: VggImageAnnotations) -> pandas.DataFrame:
 
     print(f"Region attributes found: {list(region_attrs)}")
     return df
-
 
