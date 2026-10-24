@@ -15,10 +15,12 @@ import pandas
 import shapely
 import warnings
 
+from matplotlib.axes import Axes
 from numpy.typing import NDArray
 from pathlib import Path
 from scipy.spatial import KDTree
 from shapely.geometry.base import BaseGeometry
+from shapely.plotting import plot_polygon, plot_line, plot_points
 from skimage import draw, io
 from typing import Any, Dict, Optional, List, Self, Tuple, Union
 
@@ -234,10 +236,11 @@ class VggRegion:
 
         return geometry
 
-    # TODO: 
-    #   Optionally resample the pixel coordinates based on desired distance to 
-    #   reduce the number of points for large regions.
-    def pixel_coordinates(self, image_shape: Optional[tuple] = None, distance: Optional[float] = None) -> Tuple[NDArray, ...]:
+    def pixel_coordinates(
+            self, 
+            image_shape: Optional[tuple] = None, 
+            distance: Optional[float] = None
+    ) -> Tuple[NDArray, ...]:
         """
         Generate coordinates of all pixels contained within the region, based on its shape.
         Output coordinates are in (row, col) format for NumPy indexing::
@@ -252,7 +255,9 @@ class VggRegion:
             pixel coordinates do not exceed the image boundaries.
         
         distance : float, optional
-            If provided, this parameter specifies the minimum distance between points.
+            If provided, the pixel coordinates will be sparsified such that no two pixels are 
+            closer than this distance. This is useful for reducing the number of pixels in 
+            large regions while maintaining coverage.
 
         Returns
         -------
@@ -316,8 +321,7 @@ class VggRegion:
             raise ValueError(f"Unknown shape type '{shape_name}' in VGG annotations.")
 
 
-        # TODO: Under implementation
-        # import pdb; pdb.set_trace()
+        # Sparsify the pixel coordinates
         if (distance is not None) and (shape_name != "point"):
             points_arr = numpy.column_stack(output_coords)
             tree = KDTree(data=points_arr)  # Expected data shape: (n_pixels, 2) for 2D coordinates
@@ -329,19 +333,8 @@ class VggRegion:
                 result.append(coordinate)
                 ids = tree.query_ball_point(coordinate, distance)
                 remaining.difference_update(ids)
-
             result = numpy.array(result)
-            
-            # TODO: DEBUG ONLY
-            # plt.figure()
-            # plt.scatter(points_arr[:, 1], points_arr[:, 0], alpha=0.3, )
-            # plt.scatter(result[:, 1], result[:, 0], c="green") # marker='^'
-            # plt.title(f"Distance: {distance}")
-            # plt.show()
-            # import pdb; pdb.set_trace()
-
             output_coords = (result[:, 0], result[:, 1])
-
 
         return output_coords
 
@@ -444,7 +437,7 @@ class VggImageAnnotations:
         # List of image IDs present in the annotations
         self.image_ids: List[str] = annotations.get("_via_image_id_list", [])
 
-        # Information about all images and their associated metadata
+        # Mapping of image filenames to their associated metadata, including regions and file attributes
         self.images_metadata: Dict[str, dict] = self.check_images_metadata(annotations)
 
     @classmethod
@@ -566,6 +559,65 @@ class VggImageAnnotations:
                 # If the image is new, add it to the metadata
                 self.images_metadata[other_filename] = other_metadata
 
+    # TODO: Include color mapping based on a region attribute (e.g., "label") 
+    def draw_regions(
+            self, 
+            image_filename: str, 
+            *,
+            color: Optional[str] = None,
+            ax: Optional[Axes] = None
+    ) -> Axes:
+        """
+        Draw the annotated regions of a specific image on a matplotlib Axes.
+
+        Parameters
+        ----------
+        image_filename : str
+            The filename of the image whose regions are to be drawn.
+        
+        color : str, optional
+            The color to use for drawing the regions.
+        
+        ax : matplotlib.axes.Axes, optional
+            The Axes on which to draw the regions. If None, a new figure and axes will be created.
+        
+        Returns
+        -------
+        matplotlib.axes.Axes
+            The Axes object with the drawn regions.
+        """
+        # Check if the image exists in the metadata
+        if image_filename not in self.images_metadata:
+            raise ValueError(f"Image '{image_filename}' not found in annotations.")
+
+        # Load the image
+        image_path = self.base_path / image_filename
+        image = io.imread(image_path)
+
+        # Create a new figure and axes if none provided
+        if ax is None:
+            fig, ax = plt.subplots(figsize=(8, 8))
+
+        # Display the image
+        ax.imshow(image)
+        ax.set_title(f"Annotatios for {image_filename}")
+        ax.axis("off")
+
+        # Draw each region on the axes
+        for region_data in self.images_metadata[image_filename]["regions"]:
+            vgg_region = VggRegion(
+                shape_attrs=region_data["shape_attributes"],
+                region_attrs=region_data["region_attributes"]
+            )
+            geom = vgg_region.geometry()
+            if geom.geom_type == "Polygon":
+                plot_polygon(polygon=geom, ax=ax, color=color)
+            elif geom.geom_type == "LineString":
+                plot_line(line=geom, ax=ax, color=color)
+            elif geom.geom_type == "Point":
+                plot_points(geom=geom, ax=ax, color=color)
+
+        return ax
 
 
 def vgg_to_dataframe(vgg_annotations: VggImageAnnotations) -> pandas.DataFrame:
