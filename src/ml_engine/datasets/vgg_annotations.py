@@ -59,8 +59,8 @@ def test_region(region, distance=10):
 
 # rect, circle, ellipse, polygon, point, polyline
 region = VggRegion(shape_attrs=test_attrs["rect"], region_attrs={})
-region.pixel_coordinates(distance=3)
-test_region(region, distance=5)
+# region.pixel_coordinates(distance=3)
+test_region(region, distance=3)
 
 """
 
@@ -272,7 +272,8 @@ class VggRegion:
             y = self.shape_attrs["y"]
             width = self.shape_attrs["width"]
             height = self.shape_attrs["height"]
-            output_coords = draw.rectangle(start=(y, x), extent=(height, width), shape=image_shape)
+            rr, cc = draw.rectangle(start=(y, x), extent=(height, width), shape=image_shape)
+            output_coords = (rr.ravel(), cc.ravel())
 
         elif shape_name == "circle":
             cx = self.shape_attrs["cx"]
@@ -317,7 +318,7 @@ class VggRegion:
 
         # TODO: Under implementation
         # import pdb; pdb.set_trace()
-        if (distance is not None) and (shape_name not in {"point", "polyline"}):
+        if (distance is not None) and (shape_name != "point"):
             points_arr = numpy.column_stack(output_coords)
             tree = KDTree(data=points_arr)  # Expected data shape: (n_pixels, 2) for 2D coordinates
             remaining = set(range(len(points_arr)))
@@ -332,12 +333,12 @@ class VggRegion:
             result = numpy.array(result)
             
             # TODO: DEBUG ONLY
-            plt.figure()
-            plt.scatter(points_arr[:, 1], points_arr[:, 0], alpha=0.3, )
-            plt.scatter(result[:, 1], result[:, 0], c="green") # marker='^'
-            plt.title(f"Distance: {distance}")
-            plt.show()
-            import pdb; pdb.set_trace()
+            # plt.figure()
+            # plt.scatter(points_arr[:, 1], points_arr[:, 0], alpha=0.3, )
+            # plt.scatter(result[:, 1], result[:, 0], c="green") # marker='^'
+            # plt.title(f"Distance: {distance}")
+            # plt.show()
+            # import pdb; pdb.set_trace()
 
             output_coords = (result[:, 0], result[:, 1])
 
@@ -618,4 +619,3 @@ def vgg_to_dataframe(vgg_annotations: VggImageAnnotations) -> pandas.DataFrame:
 
     print(f"Region attributes found: {list(region_attrs)}")
     return df
-
