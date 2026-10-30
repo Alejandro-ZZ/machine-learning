@@ -15,11 +15,9 @@ from sklearn.model_selection import cross_validate as sklearn_cross_validate
 from numpy.typing import ArrayLike, NDArray
 from typing import (
     Any,
-    Callable,
     Dict,
     List,
     Optional,
-    Protocol,
     Set
 )
 
@@ -28,6 +26,163 @@ from ml_engine.optuna.base_optimizer import BaseOptunaOptimizer, OptunaParamSpec
 
 
 logger = logging.getLogger("SklearnOptunaOptimizer")
+
+
+"""
+Scikit-learn classification report structure:
+```
+    {
+        "accuracy": <float>,
+        "<class_1>": { "f1-score": <float>, "precision": <float>, "recall": <float>, "support": <int> },
+        "<class_2>": { ... }, 
+        ...
+        "macro avg": { "f1-score": <float>, "precision": <float>, "recall": <float>, "support": <int> },
+        "weighted avg": { "f1-score": <float>, "precision": <float>, "recall": <float>, "support": <int> }
+    }
+```
+"""
+def sklearn_classification_report(y_true, y_pred, class_names=None, confidence_level=0.95) -> Dict[str, Any]:
+    """
+    Computes a classification report using scikit-learn's `classification_report` function.
+    Include additional metrics in the report (per-class, macro, and weighted):
+
+        * Jaccard index (jaccard)
+    
+    Include overall metrics:
+        * Cohen's kappa (cohen_kappa)
+        * Confidence intervals (intervals) as a list of [lower_bound, upper_bound]
+    
+    Parameters
+    ----------
+    y_true, y_pred : array-like of shape (n_samples,)
+        True and predicted labels.
+    
+    class_names : list of str, optional
+        Names of the classes. If None, class names will be inferred from the unique values in `y_true`.
+
+    confidence_level : float, optional
+        Confidence level for the confidence intervals. Default is 0.95 (95% confidence interval).
+    """
+    from sklearn.metrics import classification_report, jaccard_score, cohen_kappa_score
+    from statsmodels.stats.proportion import proportion_confint
+    #
+    if class_names is None:
+        n_classes = len(numpy.unique(y_true))
+        class_names = [str(i) for i in range(n_classes)]
+    else:
+        n_classes = len(class_names)
+        if n_classes != len(numpy.unique(y_true)):
+            raise ValueError(f"Number of class names ({n_classes}) does not match number of unique classes in y_true ({len(numpy.unique(y_true))}).")
+    #
+    # The support (number of true samples) for each class
+    class_support = numpy.bincount(y_true)
+    #
+    report: dict = classification_report(
+        y_true=y_true,
+        y_pred=y_pred,
+        labels=range(n_classes),
+        target_names=class_names,
+        output_dict=True,
+        zero_division=numpy.nan
+    )
+    #
+    # Confidence intervals 
+    ci_lower, ci_upper = proportion_confint(
+        count=(y_true == y_pred).sum(),
+        nobs=len(y_true),
+        alpha=1 - confidence_level,
+        method="wilson"
+    )
+    report["intervals"] = [float(ci_lower), float(ci_upper)]
+    #
+    # Cohen's kappa score
+    cohen_kappa = cohen_kappa_score(y1=y_true, y2=y_pred)
+    report["cohen_kappa"] = float(cohen_kappa)
+    #
+    # Jaccard score (IoU) for each class and averages.
+    # Mean IoU is the macro average of the Jaccard scores.
+    classes_jaccard: NDArray = jaccard_score(
+        y_true=y_true,
+        y_pred=y_pred,
+        average=None,
+        labels=range(n_classes),
+        zero_division=0
+    )
+    # import pdb; pdb.set_trace()
+    macro_jaccard = numpy.average(classes_jaccard, weights=None)
+    weighted_jaccard = numpy.average(classes_jaccard, weights=class_support)
+    #
+    report["macro avg"]["jaccard"] = float(macro_jaccard)
+    report["weighted avg"]["jaccard"] = float(weighted_jaccard)
+    for class_index, class_name in enumerate(class_names):
+        report[class_name]["jaccard"] = float(classes_jaccard[class_index])
+    #
+    return report
+
+def display_report(report: Dict[str, Any], class_names: List[str], average: str = "macro", digits: int = 4, format: str = "grid"):
+    """
+    Display two formatted tables for the classification report:
+    1. Per-class metrics table
+    2. Overall metrics table based on the specified average type ("macro" or "weighted").
+    """
+    from tabulate import tabulate
+
+    # Prepare per-class metrics table
+    per_class_table = []
+    for class_name in class_names:
+        class_metrics = report[class_name]
+        per_class_table.append({
+            "Class": class_name,
+            "Precision": class_metrics.get("precision", float("nan")),
+            "Recall": class_metrics.get("recall", float("nan")),
+            "F1-Score": class_metrics.get("f1-score", float("nan")),
+            "Support": class_metrics.get("support", float("nan")),
+            "Jaccard": class_metrics.get("jaccard", float("nan"))
+        })
+
+    # Other overall metric names that are not per-class or average metrics
+    other_metrics = {
+        name 
+        for name in report.keys() 
+        if ("avg" not in name) and (name not in class_names)
+    }
+    
+    # Prepare overall metrics table 
+    overall_metrics = report[f"{average} avg"]
+
+    # Make table as | metric name | value |
+    overall_table = []
+    for metric_name in other_metrics.union(overall_metrics.keys()):
+        metric_value = overall_metrics.get(metric_name, report.get(metric_name, float("nan")))
+        #
+        # Format to the specified number of digits
+        if isinstance(metric_value, float):
+            metric_value = round(metric_value, digits)
+        elif isinstance(metric_value, (list, tuple)):
+            metric_value = [round(v, digits) for v in metric_value]
+        else:
+            raise ValueError(f"Unexpected metric value type for '{metric_name}': {type(metric_value)}")
+        #
+        overall_table.append([ metric_name, metric_value ])
+
+    # Display the tables
+    print("\nPer-Class Metrics:")
+    print(tabulate(
+        per_class_table, 
+        headers="keys", 
+        tablefmt=format, 
+        floatfmt=f".{digits}f"
+    ))
+    
+    print(f"\nOverall Metrics ({average} average):")
+    print(tabulate(
+        overall_table, 
+        headers=["Metric", "Value"], 
+        tablefmt=format, 
+        # floatfmt=f".{digits}f"
+    ))
+
+
 
 
 # Dummy class to represent a scikit-learn estimator for type hinting purposes.
