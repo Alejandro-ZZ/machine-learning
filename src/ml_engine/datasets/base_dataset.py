@@ -6,6 +6,8 @@ from typing import (
 )
 
 
+
+# TODO: Maybe rename to BaseSplitData with train(), validate(), and test() methods
 class BaseDataset(abc.ABC):
     """
     Abstract base class for datasets used in machine learning tasks.
@@ -30,3 +32,13 @@ class BaseDataset(abc.ABC):
     def test_data(self, **kwargs) -> Tuple[NDArray, ArrayLike]:
         """Retrieve the dataset's features (x) and labels (y) for testing as a tuple (x, y)."""
         raise NotImplementedError()
+
+
+# TODO: 
+#   * Implement a PandasDataset class based on MLFlow:
+#       https://mlflow.org/docs/latest/api_reference/python_api/mlflow.data.html#mlflow.data.pandas_dataset.PandasDataset
+#   * Must include data as:
+#       + Columns for features (x) and targets (y).
+#       + Split column and values for train, validation, and test sets. (maybe think about a Dataset per split)
+class PandasDataset(BaseDataset):
+    pass
