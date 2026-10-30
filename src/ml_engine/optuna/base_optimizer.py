@@ -20,6 +20,26 @@ from typing import (
 logger = logging.getLogger("OptunaOptimizer")
 
 
+"""
+A basic general hyperparameters optimization process needs:
+
+    1. The model: base algorithm with no training.
+
+    2. Search space: hyperparameters with the sampling values to explore.
+    
+    3. Data: samples to train and evaluate (validate) the model. Evaluation strategy can be:
+            *   Hold-out: train and validation sets (good for high volume data, >100.000 samples).
+                
+            *   K-fold cross-validation: only train sets later used for validation (good for low volume data, <50.000 samples).
+                In this case the evaluation metric is the average of the k-folds metrics.
+
+    4. Metric: objective function to optimize (minimize or maximize).
+    
+    5. Search strategy: method or algorithm to explore the search space: grid search, random search, bayesian, 
+       evolutionary, etc. 
+"""
+
+
 
 # TODO: 
 #   *   Model parameter dependencies logic and transformations as a module-level class 
