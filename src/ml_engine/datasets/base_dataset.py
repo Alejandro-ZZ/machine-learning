@@ -20,7 +20,7 @@ class OptimizationData(abc.ABC):
         raise NotImplementedError()
 
     @abc.abstractmethod
-    def train(self, **kwargs) -> Tuple[NDArray, NDArray]:
+    def train_data(self, **kwargs) -> Tuple[NDArray, NDArray]:
         """
         Retrieve the dataset's features (``X``) and targets (``y``) for training  
         as a tuple with two elements:
@@ -31,7 +31,7 @@ class OptimizationData(abc.ABC):
         raise NotImplementedError()
 
     @abc.abstractmethod
-    def evaluate(self, **kwargs) -> Tuple[NDArray, NDArray]:
+    def evaluate_data(self, **kwargs) -> Tuple[NDArray, NDArray]:
         """
         Retrieve the dataset's features (``X``) and targets (``y``) for validation
         as a tuple with two elements:

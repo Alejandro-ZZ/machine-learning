@@ -299,7 +299,7 @@ class SklearnOptunaOptimizer(BaseOptunaOptimizer):
     
     def _evaluate_cross_validation(self, model: BaseEstimator, suggestions: Dict[str, Any]) -> Dict[str, float]:
         """Evaluates the model using cross-validation."""
-        x_train, y_train = self.dataset.train(**suggestions)
+        x_train, y_train = self.dataset.train_data(**suggestions)
         
         cv_scores: Dict[str, NDArray] = sklearn_cross_validate(
             estimator=model,
@@ -338,8 +338,8 @@ class SklearnOptunaOptimizer(BaseOptunaOptimizer):
     def _evaluate_holdout(self, model: BaseFitEstimator, suggestions: Dict[str, Any]) -> Dict[str, float]:
         """Evaluates the model using holdout validation data."""
         # Retrieve the training and validation data
-        x_train, y_train = self.dataset.train(**suggestions)
-        x_val, y_val = self.dataset.evaluate(**suggestions)
+        x_train, y_train = self.dataset.train_data(**suggestions)
+        x_val, y_val = self.dataset.evaluate_data(**suggestions)
 
         # Fit the model on the training data
         t0 = time.perf_counter()
