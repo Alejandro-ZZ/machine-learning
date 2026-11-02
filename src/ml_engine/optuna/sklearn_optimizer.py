@@ -21,7 +21,7 @@ from typing import (
     Set
 )
 
-from ml_engine.datasets.base_dataset import BaseDataset
+from ml_engine.datasets.base_dataset import OptimizationData
 from ml_engine.optuna.base_optimizer import BaseOptunaOptimizer, OptunaParamSpec
 
 
@@ -206,7 +206,7 @@ class SklearnOptunaOptimizer(BaseOptunaOptimizer):
     estimator : BaseEstimator
         A scikit-learn estimator instance to optimize.
     
-    dataset : BaseDataset
+    dataset : OptimizationData
         A dataset object providing training and validation data.
     """
     def __init__(
@@ -214,7 +214,7 @@ class SklearnOptunaOptimizer(BaseOptunaOptimizer):
             params: List[OptunaParamSpec],
             metrics: Dict[str, str],
             estimator: BaseEstimator,
-            dataset: BaseDataset,
+            dataset: OptimizationData,
             *,
             cv: Optional[int] = None,
             seed: Optional[int] = None,
@@ -292,8 +292,8 @@ class SklearnOptunaOptimizer(BaseOptunaOptimizer):
         # -----------------------------------
         if not isinstance(self.estimator, BaseEstimator):
             raise ValueError(f"Estimator must be a subclass of 'sklearn.base.BaseEstimator'. Got: {type(self.estimator)}")
-        if not isinstance(self.dataset, BaseDataset):
-            raise ValueError(f"Dataset must be a subclass of 'BaseDataset'. Got: {type(self.dataset)}")
+        if not isinstance(self.dataset, OptimizationData):
+            raise ValueError(f"Dataset must be a subclass of 'OptimizationData'. Got: {type(self.dataset)}")
         # if not isinstance(evaluator, SklearnEvaluator):
         #     raise ValueError(f"`evaluator` must be a SklearnEvaluator. Got: {type(evaluator)}")
     
