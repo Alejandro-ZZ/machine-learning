@@ -20,26 +20,49 @@ class OptimizationData(abc.ABC):
         raise NotImplementedError()
 
     @abc.abstractmethod
-    def train_data(self, **kwargs) -> Tuple[NDArray, NDArray]:
+    def optimization_data(self, train: bool, **kwargs) -> Tuple[NDArray, NDArray]:
         """
-        Retrieve the dataset's features (``X``) and targets (``y``) for training  
-        as a tuple with two elements:
-
-        * ``X``: A 2D array of shape (``n_samples``, ``n_features``).
-        * ``y``: A 1D or 2D array of shape (``n_samples``,) or (``n_samples``, ``n_targets``). 
-        """
-        raise NotImplementedError()
-
-    @abc.abstractmethod
-    def evaluate_data(self, **kwargs) -> Tuple[NDArray, NDArray]:
-        """
-        Retrieve the dataset's features (``X``) and targets (``y``) for validation
+        Retrieve the dataset's features (``X``) and targets (``y``) for optimization
         as a tuple with two elements:
 
         * ``X``: A 2D array of shape (``n_samples``, ``n_features``).
         * ``y``: A 1D or 2D array of shape (``n_samples``,) or (``n_samples``, ``n_targets``).
+
+        Parameters
+        ----------
+        train : bool
+            If True, return data for training. Otherwise, return data for validation.
+        
+        **kwargs
+            Additional keyword arguments for dataset retrieval. 
+            This is useful for datasets that require: 
+            
+            * Parameters for data access or preprocessing.
+            * Optimize data retrieval based on dataset configurations.
         """
         raise NotImplementedError()
+
+    # @abc.abstractmethod
+    # def train_data(self, **kwargs) -> Tuple[NDArray, NDArray]:
+    #     """
+    #     Retrieve the dataset's features (``X``) and targets (``y``) for training  
+    #     as a tuple with two elements:
+
+    #     * ``X``: A 2D array of shape (``n_samples``, ``n_features``).
+    #     * ``y``: A 1D or 2D array of shape (``n_samples``,) or (``n_samples``, ``n_targets``). 
+    #     """
+    #     raise NotImplementedError()
+
+    # @abc.abstractmethod
+    # def evaluate_data(self, **kwargs) -> Tuple[NDArray, NDArray]:
+    #     """
+    #     Retrieve the dataset's features (``X``) and targets (``y``) for validation
+    #     as a tuple with two elements:
+
+    #     * ``X``: A 2D array of shape (``n_samples``, ``n_features``).
+    #     * ``y``: A 1D or 2D array of shape (``n_samples``,) or (``n_samples``, ``n_targets``).
+    #     """
+    #     raise NotImplementedError()
 
     # @abc.abstractmethod
     # def test_data(self, **kwargs) -> Tuple[NDArray, ArrayLike]:
