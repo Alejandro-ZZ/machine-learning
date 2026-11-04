@@ -461,10 +461,27 @@ class VggImageAnnotations:
 
     def to_json(self, filepath: Union[str, Path]):
         """Save the current annotations to a JSON file."""
+        # We need to match the structure of a VIA project JSON file 
+        # for the modified ``images_metadata`` attribute.
+        # There are two original attribute changes:
+        #   1. The image metadata is now indexed by filename instead of the original image ID.
+        #   2. The original image ID is stored in the "id" key of each image's metadata for reference.
+        # Finally if no image ids are present, we will generate them from the "id" key in the image metadata.
+        original_images_metadata: Dict[str, dict] = {}
+        for filename, image_data in self.images_metadata.items():
+            # Store the original metadata structure
+            image_id = image_data["id"]
+            original_images_metadata[image_id] = image_data
+            original_images_metadata[image_id].pop("id")
+
+            # If the image ID is not already in the list, add it
+            if image_id not in self.image_ids:
+                self.image_ids.append(image_id)
+
         filepath = Path(filepath)
         data_to_save = {
             "_via_settings": self.settings,
-            "_via_img_metadata": self.images_metadata,
+            "_via_img_metadata": original_images_metadata,
             "_via_attributes": self.attributes,
             "_via_data_format_version": self.data_version,
             "_via_image_id_list": self.image_ids
@@ -518,6 +535,11 @@ class VggImageAnnotations:
             # Store the original image ID for reference
             image_data["id"] = image_id
 
+            # Store the image ID if it is not already in the list 
+            # (occurs when creating a new instance from a non-project JSON file)
+            if image_id not in self.image_ids:
+                self.image_ids.append(image_id)
+
             # Add the image data to the new metadata
             new_metadata[image_filename] = image_data
 
@@ -526,6 +548,25 @@ class VggImageAnnotations:
     def merge(self, other: "VggImageAnnotations"):
         """
         Merge another VggImageAnnotations instance into this one.
+
+        Notes
+        -----
+        *   The ``settings`` and ``attributes`` attributes are updated with the 
+            values from the other instance. If there are conflicting keys, the 
+            values from the other instance will overwrite the current ones.
+
+        *   The ``data_version`` is updated to the maximum of the two instances.
+
+        *   The ``image_ids`` list is extended with the image IDs from the other 
+            instance, ensuring that there are no duplicates. If an image ID already 
+            exists, a warning is issued.
+        
+        *   For existing images in the ``images_metadata``, the "regions" list is 
+            extended with the regions from the other instance, and the "file_attributes" 
+            dictionary is updated.
+
+        *   For new images in the ``images_metadata``, the image data from the other 
+            instance is added directly.
 
         Parameters
         ----------
@@ -538,7 +579,12 @@ class VggImageAnnotations:
         self.data_version = max(self.data_version, other.data_version)
 
         # Merge the image IDs
-        self.image_ids.extend(other.image_ids)
+        # self.image_ids.extend(other.image_ids)
+        for other_image_id in other.image_ids:
+            if other_image_id not in self.image_ids:
+                self.image_ids.append(other_image_id)
+            else:
+                warnings.warn(f"Image ID '{other_image_id}' already exists in the current annotations. Skipping.")
 
         # Merge the images metadata (include both existing and new images)
         for other_filename, other_metadata in other.images_metadata.items():
