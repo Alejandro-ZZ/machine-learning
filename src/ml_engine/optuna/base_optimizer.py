@@ -5,7 +5,7 @@ import optuna
 
 from optuna.pruners import BasePruner
 from optuna.samplers import BaseSampler
-from optuna.study import Study
+from optuna.study import Study, StudyDirection
 from optuna.trial import FrozenTrial, Trial, TrialState
 from typing import (
     Any,
@@ -144,6 +144,13 @@ class OptunaParamSpec:
         return suggested_value
 
 
+# TODO:
+#   * Add a method to save/load the optimizer state (e.g., parameters, study info, etc) maybe serialized as JSON or Pickle.
+#   * Add a method to resume optimization from a previous state having optionally some parameters with a fixed value.
+#   * Verify concurrency issues when using Sqlite (RDBStorage) with multiple processes/threads
+#   * Add automatic sampler selection based on a search space (e.g., TPE, CMA-ES, etc)
+#   * Add automatic pruner selection based on the sampler (e.g., Hyperband, Median, etc)
+#   * Add automatic estimation of extra trials needed given the search space and optimization algorithm (e.g., n_startup_trials for TPE)
 class BaseOptunaOptimizer(abc.ABC):
     """
     Note
@@ -529,8 +536,10 @@ class BaseOptunaOptimizer(abc.ABC):
         Returns
         -------
         List[optuna.trial.FrozenTrial] | optuna.Study
-            A list of the top N FrozenTrial objects or a new Optuna study containing only the
-            top trials, depending on the `as_study` parameter.
+            The top N trials based on the specified objective metric.
+            *   If ``as_study=False``, returns a list of the top N FrozenTrial objects.
+            *   If ``as_study=True``, returns a new Optuna study named as `{current_study_name}_top{n_top}` 
+                containing only the top trials.
         """
         # Argument validation
         if self.study is None:
@@ -556,7 +565,7 @@ class BaseOptunaOptimizer(abc.ABC):
             logger.warning("No completed trials found in the study")
         else:
             # Sort trials based on the specified objective and select the top N
-            is_descending = self.study.directions[objective_index] == optuna.study.StudyDirection.MAXIMIZE
+            is_descending = self.study.directions[objective_index] == StudyDirection.MAXIMIZE
             top_trials = sorted(completed_trials, key=lambda t: t.values[objective_index], reverse=is_descending)
             top_trials = top_trials[:n_top]
 
