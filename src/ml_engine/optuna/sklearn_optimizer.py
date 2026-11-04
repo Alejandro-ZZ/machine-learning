@@ -18,7 +18,8 @@ from typing import (
     Dict,
     List,
     Optional,
-    Set
+    Set,
+    Union
 )
 
 from ml_engine.datasets.base_dataset import OptimizationData
@@ -394,3 +395,84 @@ class SklearnOptunaOptimizer(BaseOptunaOptimizer):
             evaluation_metrics = self._evaluate_cross_validation(model, suggestions)
 
         return evaluation_metrics
+
+
+
+# TODO: Maybe include some data validation in the `SklearnOptunaOptimizer` class
+def validate_sklearn_data(
+        data_name: str,
+        n_features: int,
+        X: Optional[Union[NDArray, pandas.DataFrame]] = None,
+        y: Optional[NDArray] = None,
+        is_optional: bool = True,
+        n_targets: int = 1,
+
+):
+    """
+    Validate the input data for training, validation, or testing.
+
+    Parameters
+    ----------
+    data_name : str
+        Name of the data split (e.g., "training", "validation", "testing") for error messages.
+
+    n_features : int
+        Expected number of features (X) in the input data.
+
+    X : numpy.ndarray | pandas.DataFrame, optional
+        Feature data. Must be a 2D array with shape (n_samples, n_features). Default is None.
+
+    y : numpy.ndarray, optional
+        Target data. Must be a 1D or 2D array with shape (n_samples,) or (n_samples, n_targets). Default is None.
+
+    is_optional : bool, optional
+        Whether the data is optional (e.g., validation or test set). Default is True.
+
+    n_targets : int, optional
+        Expected number of target variables (y). Default is 1.
+    """
+    # Both X and y must be provided together or not at all
+    if (X is None) != (y is None):
+        raise ValueError(f"Features (X) and target (y) must be provided together. Got X={type(X)}, y={type(y)}")
+
+    # If both are None, check if they are required or optional
+    if (X is None) and (y is None):
+        if not is_optional:
+            raise ValueError(f"Missing required features (X) and target (y) data for '{data_name}'")
+        else:
+            # Optional data not provided, nothing to validate
+            return
+
+    # X and y must be numpy arrays
+    x_types = (numpy.ndarray, pandas.DataFrame)
+    if not isinstance(X, x_types) or not isinstance(y, numpy.ndarray):
+        raise ValueError(
+            f"Features (X) must be a numpy array or pandas DataFrame and target (y) must be a numpy array "
+            f"for '{data_name}' data. Got X={type(X)}, y={type(y)}"
+        )
+
+    # Check X and y dimensions and compatibility
+    if X.ndim != 2:
+        raise ValueError(f"`Features (X) for '{data_name}' data must be a 2D array. Got shape: {X.shape}")
+    if y.ndim != 1 and y.ndim != 2:
+        raise ValueError(f"Target (y) for '{data_name}' data must be a 1D or 2D array. Got shape: {y.shape}")
+
+    # X and y must have at least one sample
+    if X.size == 0 or y.size == 0:
+        raise ValueError(
+            f"Features (X) and target (y) for '{data_name}' data cannot be empty arrays."
+            f"Got shapes: X={X.shape}, y={y.shape}"
+        )
+
+    # X and y must have the same number of samples
+    if X.shape[0] != y.shape[0]:
+        raise ValueError(
+            f"Features (X) and target (y) for '{data_name}' data must have the same number of samples."
+            f"Got shapes: X={X.shape}, y={y.shape}"
+        )
+
+    # Check the number of features and targets
+    if X.shape[1] != n_features:
+        raise ValueError(f"'{data_name}' data must have {n_features} features. Got: {X.shape[1]}")
+    if (y.ndim == 1 and n_targets != 1) or (y.ndim == 2 and y.shape[1] != n_targets):
+        raise ValueError(f"'{data_name}' data must have {n_targets} targets. Got: {y.shape}")
