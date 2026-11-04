@@ -306,7 +306,7 @@ class SklearnOptunaOptimizer(BaseOptunaOptimizer):
             estimator=model,
             X=x_train,
             y=y_train,
-            scoring=self.metric_names,
+            scoring=self.objective_names,
             cv=self.cv,
             n_jobs=1,   # TODO: Set this to 1 to avoid potential issues with parallelism in Optuna `optimize()` method
             return_train_score=False,
@@ -331,7 +331,7 @@ class SklearnOptunaOptimizer(BaseOptunaOptimizer):
 
         # Include the objective metrics with the correct name to report
         # Example: "mean_val_accuracy" for the "accuracy" objective metric
-        for metric_name in self.metric_names:
+        for metric_name in self.objective_names:
             evaluation_metrics[metric_name] = evaluation_metrics[f"mean_val_{metric_name}"]
 
         return evaluation_metrics
@@ -353,7 +353,7 @@ class SklearnOptunaOptimizer(BaseOptunaOptimizer):
         evaluation_metrics: Dict[str, float] = { "fit_time": fit_time }
 
         # Evaluate the model on the validation data for each metric
-        for score_name in self.metric_names:
+        for score_name in self.objective_names:
             scorer_fnc = get_scorer(score_name)
             t0 = time.perf_counter()
             score_value = scorer_fnc(model, x_val, y_val)

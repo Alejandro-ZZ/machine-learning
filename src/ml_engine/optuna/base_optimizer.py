@@ -5,6 +5,8 @@ import optuna
 
 from optuna.pruners import BasePruner
 from optuna.samplers import BaseSampler
+from optuna.study import Study
+from optuna.trial import FrozenTrial, Trial, TrialState
 from typing import (
     Any,
     Callable,
@@ -107,7 +109,7 @@ class OptunaParamSpec:
             *,
             default: Optional[Any] = None,
             depends_on: Optional[Sequence[str]] = None,
-            transform_fnc: Optional[Callable[[optuna.Trial, Any], Any]] = None,
+            transform_fnc: Optional[Callable[[Trial, Any], Any]] = None,
     ):
         self.name = name
         self.type = type
@@ -120,7 +122,8 @@ class OptunaParamSpec:
             raise ValueError("The `transform_fnc` argument must be callable.")
 
 
-    def suggest(self, trial: optuna.Trial) -> Any:
+
+    def suggest(self, trial: Trial) -> Any:
         """Suggests a hyperparameter value based on the current Optuna Trial object."""
         # Suggest the hyperparameter value based on its type and options
         if self.type == "int":
@@ -164,19 +167,19 @@ class BaseOptunaOptimizer(abc.ABC):
     """
     def __init__(self, params: List[OptunaParamSpec], metrics: Dict[str, str]):
         self.parameters = self._validate_params(params) # Parameter specifications to optimize
-        self.metric_names: List[str] = []               # Metric names to optimize
-        self.metric_directions: List[str] = []          # Metric optimization directions (minimize or maximize)
-        self.study: Optional[optuna.Study] = None       # Optuna Study instace for optimization process
+        self.objective_names: List[str] = []            # Objective names to optimize
+        self.objective_directions: List[str] = []       # Objective optimization directions (minimize or maximize)
+        self.study: Optional[Study] = None              # Optuna Study instace for optimization process
         self.metadata: Dict[str, Any] = {
             "study": None,      # name, storage, metric names, directions, pruner name, sampler name
             "optimize": None,   # execution time, trials info, best trial(s) info
         }
         
-        # Populate metric names and directions ordered 
+        # Populate objective names and directions ordered 
         metrics = self._validate_metrics(metrics)
         for metric_name, metric_direction in metrics.items():
-            self.metric_names.append(metric_name)
-            self.metric_directions.append(metric_direction)
+            self.objective_names.append(metric_name)
+            self.objective_directions.append(metric_direction)
 
     @staticmethod
     def _validate_params(params: List[OptunaParamSpec]) -> Tuple[OptunaParamSpec, ...]:
@@ -302,7 +305,7 @@ class BaseOptunaOptimizer(abc.ABC):
         logger.debug("[Start] setup_study()")
         
         # Warn and disable pruning if multi-objective optimization is detected
-        multi_objective = len(self.metric_names) > 1
+        multi_objective = len(self.objective_names) > 1
         if pruner is not None:
             if not self.supports_pruning():
                 logger.warning("Pruning is not supported by the current optimizer. Ignoring the provided pruner.")
@@ -313,13 +316,13 @@ class BaseOptunaOptimizer(abc.ABC):
 
         # Get the optimization direction(s) and metric name(s)
         if not multi_objective:
-            direction = self.metric_directions[0]
+            direction = self.objective_directions[0]
             directions = None
-            metric_names = list(self.metric_names)
+            # metric_names = list(self.objective_names)
         else:
             direction = None
-            directions = self.metric_directions
-            metric_names = self.metric_names
+            directions = self.objective_directions
+            # metric_names = self.objective_names
 
         # Create or load the study
         self.study = optuna.create_study(
@@ -334,20 +337,20 @@ class BaseOptunaOptimizer(abc.ABC):
 
         # Names each dimension of the returned values of the objective function
         # Experimental in optuna
-        self.study.set_metric_names(metric_names=metric_names)
+        self.study.set_metric_names(metric_names=self.objective_names)
         
         # Include study info in the optimizer metadata
         self.metadata["study"] = {
             "name": name,
             "storage": storage_url,
-            "metrics": metric_names,
-            "directions": self.metric_directions,
+            "metrics": self.objective_names,
+            "directions": self.objective_directions,
             "pruner": pruner.__class__.__name__ if pruner is not None else None,
             "sampler": sampler.__class__.__name__ if sampler is not None else None,
         }
         logger.debug("[Finish] setup_study()")
 
-    def on_trial_start(self, trial: optuna.Trial):
+    def on_trial_start(self, trial: Trial):
         """
         Hook called at the start of each trial. 
 
@@ -359,7 +362,7 @@ class BaseOptunaOptimizer(abc.ABC):
         """
         pass
 
-    def on_trial_end(self, trial: optuna.Trial, value: Union[float, tuple]):
+    def on_trial_end(self, trial: Trial, value: Union[float, tuple]):
         """
         Hook called at the end of each trial.
 
@@ -375,7 +378,7 @@ class BaseOptunaOptimizer(abc.ABC):
         """
         pass
 
-    def objective(self, trial: optuna.Trial) -> Union[float, Sequence[float]]:
+    def objective(self, trial: Trial) -> Union[float, Sequence[float]]:
         # TODO: Support conditional hyperparameter dependencies
         # Suggest hyperparameter values 
         trial_suggestions = {
@@ -398,19 +401,19 @@ class BaseOptunaOptimizer(abc.ABC):
             raise e
 
         # Check for the required metrics
-        missing_metrics = set(self.metric_names) - set(trial_metrics.keys())
+        missing_metrics = set(self.objective_names) - set(trial_metrics.keys())
         if missing_metrics:
             raise ValueError(f"Missing required metrics in trial evaluation: {missing_metrics}. Got: {trial_metrics}")
 
         # Extract the objective values in the correct order
-        objective_value = tuple(trial_metrics[metric_name] for metric_name in self.metric_names)
+        objective_value = tuple(trial_metrics[metric_name] for metric_name in self.objective_names)
         if len(objective_value) == 1:
             # Single metric value for single-objective optimization
             objective_value = objective_value[0]
 
         # Attach remaining metrics to trial attributes
         for metric_name, metric_value in trial_metrics.items():
-            if metric_name not in self.metric_names:
+            if metric_name not in self.objective_names:
                 trial.set_user_attr(metric_name, metric_value)
         
         # Optional hook at the end of the trial
@@ -464,18 +467,18 @@ class BaseOptunaOptimizer(abc.ABC):
         trials_info: Dict[str, int] = {"completed": 0, "pruned": 0, "failed": 0}
         all_trials = self.study.trials
         for trial in all_trials:
-            if trial.state == optuna.trial.TrialState.COMPLETE:
+            if trial.state == TrialState.COMPLETE:
                 trials_info["completed"] += 1
-            elif trial.state == optuna.trial.TrialState.PRUNED:
+            elif trial.state == TrialState.PRUNED:
                 trials_info["pruned"] += 1
-            elif trial.state == optuna.trial.TrialState.FAIL:
+            elif trial.state == TrialState.FAIL:
                 trials_info["failed"] += 1
         trials_info["total"] = len(all_trials)
         logger.info(f"Trial information: {trials_info}")
 
         # Get the best trial(s) based on the optimization strategy
-        best_trials: List[optuna.trial.FrozenTrial] = []
-        if len(self.metric_names) == 1:
+        best_trials: List[FrozenTrial] = []
+        if len(self.objective_names) == 1:
             best_trials.append(self.study.best_trial)
         else:
             best_trials = self.study.best_trials
@@ -485,7 +488,7 @@ class BaseOptunaOptimizer(abc.ABC):
         for trial in best_trials:
             trial_info = {
                 "number": trial.number,
-                "values": trial.values if len(self.metric_names) > 1 else [trial.value],
+                "values": trial.values if len(self.objective_names) > 1 else [trial.value],
                 "params": trial.params,
                 "attributes": trial.user_attrs,
             }
@@ -499,5 +502,75 @@ class BaseOptunaOptimizer(abc.ABC):
         }
 
         logger.debug("[Finish] optimize()")
+
+
+    def top_trials(
+            self,
+            n_top: int,
+            metric_name: Optional[str] = None,
+            as_study: bool = False,
+    ) -> Union[List[FrozenTrial], Study]:
+        """
+        Retrieves the top N trials based on a specified objective metric.
+
+        Parameters
+        ----------
+        n_top : int
+            The number of top trials to retrieve. Must be at least 1.
+
+        metric_name : str, optional
+            The name of the objective metric to sort by. If None (default), the unique or first 
+            objective is used (in case of multi-objective optimization).
+
+        as_study : bool, optional
+            If True, returns the top trials as a new Optuna study object. If False (default), 
+            returns a list of FrozenTrial objects.
+
+        Returns
+        -------
+        List[optuna.trial.FrozenTrial] | optuna.Study
+            A list of the top N FrozenTrial objects or a new Optuna study containing only the
+            top trials, depending on the `as_study` parameter.
+        """
+        # Argument validation
+        if self.study is None:
+            raise ValueError("Study is not initialized. Call 'setup_study()' and 'optimize()' first.")
+        if n_top < 1:
+            raise ValueError("Number of top trials must be at least 1.")
+        if (metric_name is not None) and (metric_name not in self.objective_names):
+            raise ValueError(
+                f"Objective name '{metric_name}' not found in the defined objectives: {self.objective_names}"
+            )
+
+        # Determine the index of the specified objective
+        objective_index = 0
+        if metric_name is not None:
+            objective_index = self.objective_names.index(metric_name)
+        logger.info(f"Filtering top {n_top} trial(s) based on '{self.objective_names[0]}' metric")
+
+        # Get all completed trials
+        top_trials: List[FrozenTrial] = []
+        completed_trials = self.study.get_trials(deepcopy=False, states=(TrialState.COMPLETE, ))
+        if not completed_trials:
+            # No completed trials found
+            logger.warning("No completed trials found in the study")
+        else:
+            # Sort trials based on the specified objective and select the top N
+            is_descending = self.study.directions[objective_index] == optuna.study.StudyDirection.MAXIMIZE
+            top_trials = sorted(completed_trials, key=lambda t: t.values[objective_index], reverse=is_descending)
+            top_trials = top_trials[:n_top]
+
+        # Return the respective data type
+        if len(top_trials) > 0 and as_study:
+            # Create a new in-memory study containing only the top trials
+            top_study = optuna.create_study(
+                study_name=f"{self.study.study_name}_top{n_top}",
+                directions=self.study.directions
+            )
+            top_study.add_trials(top_trials)
+            return top_study
+        else:
+            return top_trials
+
 
 
