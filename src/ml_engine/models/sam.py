@@ -6,11 +6,13 @@ import numpy
 import time
 import torch
 
+from segment_anything import SamPredictor
 from numpy.typing import NDArray
 from typing import (
     Any,
     Dict,
     List,
+    Tuple,
     Optional
 )
 
@@ -19,11 +21,23 @@ logger = logging.getLogger("SAM")
 
 
 class SparsePointsSamPredictor:
+    """
+    A custom SAM predictor for handling multi-class sparse point inputs.
 
+    Parameters
+    ----------
+    predictor : SamPredictor
+        An instance of the SAM predictor from the `segment_anything` library.
+        See: https://github.com/facebookresearch/segment-anything/blob/main/segment_anything/predictor.py
+    
+    device : str, optional
+        The device to use for the predictor. It can be either "cpu" or "cuda".
+        Default is "cpu".
+    """
     _SUPPORTED_DEVICES = {"cpu", "cuda"}
     _IMAGE_FORMATS = {"RGB", "BGR"}
 
-    def __init__(self, predictor: Any, device: str = "cpu"):
+    def __init__(self, predictor: SamPredictor, device: str = "cpu"):
         # Validations
         # ---------------------------------------------------
         # Check the input processing device
@@ -42,13 +56,19 @@ class SparsePointsSamPredictor:
 
         self.processing_times: Dict[str, float] = {}        # General workflow processing times in seconds
         self.prediction_times: Dict[str, float] = {}        # Per-class prediction times in seconds
-        self.mask_logits: Optional[torch.Tensor] = None     # Mask logits predicted. Shape: (n_classes, H, W)
         self.class_to_points: Dict[str, NDArray] = {}       # Mapping from class names to (x, y) coordinates
 
+        # Mask logits predicted. Shape: (n_classes, H, W)
+        self.mask_logits: torch.Tensor = torch.empty(0, 0, 0, device=self.device, dtype=torch.float32)
+        
         # Private attributes
         # ---------------------------------------------------
         self._class_names: List[str] = []       # Class names for the points
-        self._image: Optional[NDArray] = None   # Image to predict on
+        # self._image: Optional[NDArray] = None   # Image to predict on
+        
+        # Current image dimensions (height, width) for the input image
+        self._img_height: int = 0
+        self._img_width: int = 0
 
     def __str__(self):
         return (
@@ -181,8 +201,8 @@ class SparsePointsSamPredictor:
                 This is obtained by taking the argmax over the raw logits along the class dimension.
         """
         # Check if the image embedding has been set
-        if self._image is None:
-            raise ValueError("Image embedding has not been set. Use 'set_input' method first.")
+        if (self._img_height == 0) or (self._img_width == 0):
+            raise ValueError("Image embedding has not been set. Use 'set_input()' method first.")
 
         # Run predictions for each class
         if use_background_prompts:
@@ -215,7 +235,9 @@ class SparsePointsSamPredictor:
         # Update input attributes
         self._class_names = sorted_classes
         self.class_to_points = {}
-        self._image = None
+        # self._image = None
+        self._img_height = 0
+        self._img_width = 0
 
         # Compute mapping from class names to coordinates
         # TODO: What happens if there are no input points for a class?
@@ -235,7 +257,7 @@ class SparsePointsSamPredictor:
         try:
             logger.info("Calculating the image embeddings")
             self.predictor.set_image(image=image, image_format=image_format)
-            self._image = image
+            # self._image = image
         except Exception as e:
             if self.device == "cuda":
                 torch.cuda.empty_cache()
@@ -247,15 +269,79 @@ class SparsePointsSamPredictor:
 
         # Initialize a logit tensor for all classes
         # Fill with a very low value so that unpredicted classes don't win argmax
-        height, width, _ = self._image.shape
+        self._img_height, self._img_width = image.shape[:2]
         self.mask_logits = torch.full(
-            size=(len(self._class_names), height, width),
+            size=(len(self._class_names), self._img_height, self._img_width),
             fill_value=-float("inf"),
             device=self.device,
             dtype=torch.float32
         )
 
-    def _predict(self, use_background_prompts: bool = False):
+    def _get_class_points(self, class_name: str, include_background: bool) -> Tuple[NDArray, NDArray]:
+        """
+        Get the needed SAM's input points (coordinates and labels) for a specific class, 
+        optionally including background points.
+
+        Parameters
+        ----------
+        class_name : str
+            The name of the class for which to get the input points. 
+            Must be present in ``self._class_names`` attribute.
+        
+        include_background : bool
+            Whether to include background points in the input points.
+        
+        Returns
+        -------
+        Tuple[NDArray, NDArray]
+            A tuple containing two elements:
+            
+            1.  ``input_points``: 2D integer array of shape (N, 2) containing the ``(x, y)`` 
+                coordinates of the input points.
+            
+            2.  ``input_labels``: 1D integer array of shape (N,) containing the corresponding 
+                labels of the input points. A value of ``1`` indicates a positive point (foreground), 
+                while a value of ``0`` indicates a negative point (background).
+        """
+        if class_name not in self.class_to_points:
+            input_points = numpy.array([])
+            input_labels = numpy.array([])
+
+        else:
+            # Get positive class data
+            class_idx = self._class_names.index(class_name)
+            positive_points = self.class_to_points[class_name]
+
+            # Create the input points and labels
+            input_points_list: List[NDArray] = []
+            input_labels_list: List[NDArray] = []
+            input_points_list.append(positive_points)
+            input_labels_list.append(numpy.ones(shape=len(positive_points), dtype=int))
+
+            # Include negative points in the input points prompt
+            negative_points = numpy.array([])
+            if include_background:
+                negative_classes = set(self._class_names) - {class_name}
+                negative_list = [
+                    self.class_to_points[negative_class]
+                    for negative_class in negative_classes
+                    if negative_class in self.class_to_points
+                ]
+                negative_points = numpy.vstack(negative_list)
+                if len(negative_points) > 0:
+                    input_points_list.append(negative_points)
+                    input_labels_list.append(numpy.zeros(shape=len(negative_points), dtype=int))
+                    # logger.debug(f"Background points included for class '{class_name}': {len(negative_points)}")
+                else:
+                    logger.warning(f"No background points available for class '{class_name}'")
+
+            # Create the inputs as arrays
+            input_points = numpy.vstack(input_points_list)
+            input_labels = numpy.concatenate(input_labels_list)
+
+        return input_points, input_labels
+
+    def _predict(self, include_background: bool = False):
         """
         Runs SAM predictor for each class present in the image's training dataframe subset.
 
@@ -277,78 +363,60 @@ class SparsePointsSamPredictor:
         final_prediction_time = 0.0
 
         # Per-class inference
-        for positive_class in self._class_names:
-            if positive_class not in self.class_to_points:
-                logger.warning(f"No input points for class '{positive_class}'. Skipping predictions.")
+        for class_name in self._class_names:
+            # Input points and labels for the current class
+            input_points, input_labels = self._get_class_points(class_name, include_background)
+            if (input_points.size == 0) or (input_labels.size == 0):
+                logger.warning(f"('{class_name}') No input points, skipping predictions.")
                 continue
 
-            # Get positive class data
-            class_idx = self._class_names.index(positive_class)
-            positive_points = self.class_to_points[positive_class]
-            logger.debug(f"Predicting '{positive_class}' class (id={class_idx})")
-
-            # Create the input points and labels
-            input_points_list = []
-            input_labels_list = []
-            input_points_list.append(positive_points)
-            input_labels_list.append(numpy.ones(shape=len(positive_points), dtype=int))
-
-            # Include negative points in the input points prompt
-            if use_background_prompts:
-                negative_classes = set(self._class_names) - {positive_class}
-                negative_list = [
-                    self.class_to_points[negative_class]
-                    for negative_class in negative_classes
-                    if negative_class in self.class_to_points
-                ]
-                negative_points = numpy.vstack(negative_list)
-                if len(negative_points) > 0:
-                    input_points_list.append(negative_points)
-                    input_labels_list.append(numpy.zeros(shape=len(negative_points), dtype=int))
-                    logger.debug(f"Total background points for class '{positive_class}': {len(negative_points)}")
-                else:
-                    logger.warning(f"No background points found for class '{positive_class}'")
-
-            # Create the inputs as arrays
-            input_points = numpy.vstack(input_points_list)
-            input_labels = numpy.concatenate(input_labels_list)
-
-            logger.debug(f"Running SAM predictions with {len(input_points)} input prompts")
             try:
+                # Log the number of input points for the class
+                class_idx = self._class_names.index(class_name)
+                logger.debug(
+                    f"('{class_name}') Predicting mask: "
+                    f"id={class_idx}, "
+                    f"total_points={len(input_points)}, "
+                    f"foregrounds={numpy.sum(input_labels == 1)}, "
+                    f"backgrounds={numpy.sum(input_labels == 0)}"
+                )
+
                 with torch.no_grad():
-                    #   masks_logits --> array of shape: (n_masks, height, width)
-                    #         scores --> array of shape: (n_masks, )
-                    # low_res_logits --> array of shape: (n_masks, 256, 256)
-                    start_time = time.perf_counter()
+                    # Make predictions using the SAM predictor
+                    #       masks_logits --> array of shape: (n_masks, height, width)
+                    #             scores --> array of shape: (n_masks, )
+                    #   low_res_logits --> array of shape: (n_masks, 256, 256)
+                    t0 = time.perf_counter()
                     masks_logits, scores, low_res_logits = self.predictor.predict(
                         point_coords=input_points,
                         point_labels=input_labels,
-                        return_logits=True,         # Get un-thresholded masks logits instead of a binary mask
                         multimask_output=False,     # Output a single best mask/logit (n_masks=1)
+                        return_logits=True,         # Get un-thresholded masks logits instead of a binary mask
                     )
-                    predictions_time = time.perf_counter() - start_time
+                    predictions_time = time.perf_counter() - t0
+                    
+                    # Update the prediction time
                     # self.processing_times["predictions"] = predictions_time
-                    self.prediction_times[positive_class] = predictions_time
+                    self.prediction_times[class_name] = predictions_time
                     final_prediction_time += predictions_time
-                    logger.debug(f"Class '{positive_class}' prediction time: {predictions_time:.3f} seconds")
+                    logger.debug(f"('{class_name}') Prediction time: {predictions_time:.4f} seconds")
 
                     # Check expected output shapes
-                    expected_masks_shape = (1, self._image.shape[0], self._image.shape[1])
-                    if masks_logits.shape != expected_masks_shape:
+                    if masks_logits.shape != (1, self._img_height, self._img_width):
                         raise ValueError(
-                            f"Unexpected predicted masks shape. Expected: {expected_masks_shape}. "
-                            f"Predicted: {masks_logits.shape}"
+                            f"Unexpected predicted masks shape. Got: {masks_logits.shape}. "
+                            f"Expected: {(1, self._img_height, self._img_width)}"
                         )
 
-                # Place the logits in the class index slot
+                # Store the logits in the class index slot
                 self.mask_logits[class_idx, :, :] = torch.from_numpy(masks_logits).squeeze()
 
             except Exception as e:
-                raise ValueError(f"Fail to run SAM predictions for class '{positive_class}': {e}") from e
+                raise ValueError(f"('{class_name}') Failed to make SAM predictions: {e}") from e
 
         # Update the final prediction time
         self.processing_times["predictions"] = final_prediction_time
-        logger.info(f"Image predictions calculated in {final_prediction_time:.3f} seconds")
+        logger.info(f"Total prediction time: {final_prediction_time:.4f} seconds")
 
     def _postprocess(self) -> Dict[str, NDArray]:
         # Check if argmax resulted in -inf (i.e., no class positively predicted)
