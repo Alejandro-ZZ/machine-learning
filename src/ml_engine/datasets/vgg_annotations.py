@@ -16,6 +16,7 @@ import shapely
 import warnings
 
 from matplotlib.axes import Axes
+from matplotlib.lines import Line2D
 from numpy.typing import NDArray
 from pathlib import Path
 from scipy.spatial import KDTree
@@ -339,6 +340,9 @@ class VggRegion:
         return output_coords
 
 
+# TODO: 
+#   * Try to get the ``base_path`` from the ``_via_settings`` attribute if not provided at annotations["_via_settings"]["core"]["default_filepath"].
+#   * Add support for multiple search filepaths. Similar to data at annotations["_via_settings"]["core"]["filepath"] which is a mapping of search filepath to integer ID.
 class VggImageAnnotations:
     """
     A class to handle annotations from the VGG Image Annotator (VIA version 2) tool.
@@ -610,19 +614,47 @@ class VggImageAnnotations:
             self, 
             image_filename: str, 
             *,
-            color: Optional[str] = None,
+            color: Optional[Any] = None,
+            color_attribute: Optional[str] = None,
+            legend: bool = True,
             ax: Optional[Axes] = None
     ) -> Axes:
         """
         Draw the annotated regions of a specific image on a matplotlib Axes.
+
+        Notes
+        -----
+        *   When generating axes legend, it can be overlapping or cutted if using 
+            ``plt.tight_layout()``. It is recommented to use ``plt.subplots(layout="constrained")`` 
+            or ``plt.savefig("my_plot.png", bbox_inches="tight")`` if saving the figure to a file. 
 
         Parameters
         ----------
         image_filename : str
             The filename of the image whose regions are to be drawn.
         
-        color : str, optional
-            The color to use for drawing the regions.
+        color : Any, optional
+            Fixed color to use for all regions. If None (default), the matplotlib 
+            default color cycle will be used. Ignored if ``color_attribute`` is provided.
+
+            Data type must be compatible with matplotlib color specifications, e.g., a 
+            string (like "red" or "#FF0000"), a tuple of RGB or RGBA values, or a matplotlib 
+            colormap.
+
+        color_attribute : str, optional
+            If provided, regions will be colored based on the unique values of this 
+            attribute in the region attributes. 
+            
+            Each unique value will be assigned a different color. If a region does not 
+            have this attribute, it will be assigned a default color.
+
+            Color palette used is the "tab10" colormap from matplotlib. If there are more 
+            than 10 unique values, the colors will cycle through the colormap. 
+
+        legend : bool, optional
+            If True (default), a legend will be added to the plot indicating the mapping 
+            between the unique values of the ``color_attribute`` and their corresponding colors.
+            Ignored if ``color_attribute`` is None.
         
         ax : matplotlib.axes.Axes, optional
             The Axes on which to draw the regions. If None, a new figure and axes will be created.
@@ -638,11 +670,19 @@ class VggImageAnnotations:
 
         # Load the image
         image_path = self.base_path / image_filename
-        image = io.imread(image_path)
+        try:
+            image = io.imread(image_path)
+        except Exception as e:
+            raise ValueError(f"Failed to load image: filename='{image_filename}', path='{image_path}'. Error: {e}")
 
         # Create a new figure and axes if none provided
         if ax is None:
-            fig, ax = plt.subplots(figsize=(8, 8))
+            fig, ax = plt.subplots(figsize=(8, 8), layout="constrained")
+
+        # Color mapping based on a region attribute
+        # Populated dynamically based on the ``color_attribute`` unique values
+        pyplot_cmap = plt.get_cmap("tab10") # "tab20"
+        color_mapping: Dict[str, Tuple[float, float, float, float]] = {}
 
         # Display the image
         ax.imshow(image)
@@ -655,15 +695,46 @@ class VggImageAnnotations:
                 shape_attrs=region_data["shape_attributes"],
                 region_attrs=region_data["region_attributes"]
             )
+
+            # Determine the color for the region
+            if color_attribute:
+                attr_value = vgg_region.region_attrs.get(color_attribute, "Unknown")
+                if attr_value not in color_mapping:
+                    idx = len(color_mapping) % pyplot_cmap.N  # Cycle through the colormap
+                    color_mapping[attr_value] = pyplot_cmap(idx)
+                color_value = color_mapping[attr_value]
+            else:
+                color_value = color
+
+            # Draw the region gometry
             geom = vgg_region.geometry()
             if geom.geom_type == "Polygon":
-                plot_polygon(polygon=geom, ax=ax, color=color)
+                plot_polygon(polygon=geom, ax=ax, color=color_value)
             elif geom.geom_type == "LineString":
-                plot_line(line=geom, ax=ax, color=color)
+                plot_line(line=geom, ax=ax, color=color_value)
             elif geom.geom_type == "Point":
-                plot_points(geom=geom, ax=ax, color=color)
+                plot_points(geom=geom, ax=ax, color=color_value)
+
+        # Add horizontal legend for color mapping    
+        if color_attribute and legend:
+            line_kwargs: Dict[str, Any] = dict(lw=4, marker="s", color="w", markersize=10)
+            handles = [
+                Line2D([0], [0], label=attr_val, color=attr_color, markerfacecolor=attr_color, **line_kwargs)
+                for attr_val, attr_color in color_mapping.items()
+            ]
+            ax.legend(
+                handles=handles, 
+                title=color_attribute.capitalize() , 
+                loc="upper center", 
+                bbox_to_anchor=(0.5, -0.05), 
+                ncol=len(color_mapping)
+            )
 
         return ax
+
+
+
+
 
 
 def vgg_to_dataframe(vgg_annotations: VggImageAnnotations) -> pandas.DataFrame:
@@ -671,14 +742,22 @@ def vgg_to_dataframe(vgg_annotations: VggImageAnnotations) -> pandas.DataFrame:
     Convert VGG annotations to a pandas DataFrame.
     Each row corresponds to a region in the VGG annotations, with columns: 
     
-        * Filename: The name of the image file.
-        * VggShape: The shape type of the region (e.g., "rect", "circle", etc.) concatenated with the region ID.
-        * Cx: The x-coordinate of the pixel (column index).
-        * Cy: The y-coordinate of the pixel (row index).
-        * Additional columns are added for each region attribute found across all regions.
+        *   Filename: The name of the image file.
+
+        *   VggShape: The shape type of the region (e.g., "rect", "circle", etc.) concatenated with the region ID.
+            Region ID is a unique autoincremented integer for each region in the image, starting from 1.
+         
+        *   Cx: The x-coordinate of the pixel (column index).
+        
+        *   Cy: The y-coordinate of the pixel (row index).
+        
+        *   Additional columns are added for each region attribute found across all regions.
     """
-    df_rows: List[dict] = []    
-    region_attrs = set()
+    # List to hold all rows for the DataFrame
+    df_rows: List[dict] = []   
+
+    # Set to keep track of all unique region attributes across all images 
+    # region_attrs = set()
 
     # Iterate over each image in the annotations
     for image_metadata in vgg_annotations.images_metadata.values():
@@ -696,7 +775,7 @@ def vgg_to_dataframe(vgg_annotations: VggImageAnnotations) -> pandas.DataFrame:
             )
 
             # Add the region attributes to the set
-            region_attrs.update(vgg_region.region_attrs.keys())
+            # region_attrs.update(vgg_region.region_attrs.keys())
 
             # Get pixel coordinates
             rows, cols = vgg_region.pixel_coordinates(image_shape=image_shape)
@@ -715,5 +794,16 @@ def vgg_to_dataframe(vgg_annotations: VggImageAnnotations) -> pandas.DataFrame:
     # Create the DataFrame from the list of rows
     df = pandas.DataFrame(data=df_rows)
 
-    print(f"Region attributes found: {list(region_attrs)}")
+    # Get all unique region attributes across all regions with its unique values
+    region_attrs: Dict[str, set] = {
+        attr: set(df[attr]) 
+        for attr in df.columns 
+        if attr not in {"Filename", "VggShape", "Cx", "Cy"}
+    }
+
+    # Display found region attributes
+    print(f"Region attributes found:")
+    for attr, values in region_attrs.items():
+        print(f"  * {attr}: {list(values)}")
+    
     return df
