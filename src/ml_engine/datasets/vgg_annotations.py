@@ -609,7 +609,7 @@ class VggImageAnnotations:
                 # If the image is new, add it to the metadata
                 self.images_metadata[other_filename] = other_metadata
 
-    # TODO: Include color mapping based on a region attribute (e.g., "label") 
+
     def draw_regions(
             self, 
             image_filename: str, 
@@ -627,6 +627,25 @@ class VggImageAnnotations:
         *   When generating axes legend, it can be overlapping or cutted if using 
             ``plt.tight_layout()``. It is recommented to use ``plt.subplots(layout="constrained")`` 
             or ``plt.savefig("my_plot.png", bbox_inches="tight")`` if saving the figure to a file. 
+
+        Examples
+        --------
+        * Draw regions with default colors and legend::
+
+            annotaations = VggImageAnnotations.from_json("annotations.json", base_path="images/")
+            annotations.draw_regions("image.jpg")
+
+            
+        * Generate a figure for each annotated image in the annotations::
+
+            for image_filename in annotations.images_metadata.keys():
+                fig, ax = plt.subplots(figsize=(8, 8), layout="constrained")
+                annotations.draw_regions(image_filename, color_attribute="class", ax=ax)
+                ax.set_title(f"{image_filename}", fontweight="bold")
+                ax.axis("off")
+                fig.savefig(f"{image_filename}_annotations.png", dpi=300)
+                plt.show()
+                plt.close(fig)
 
         Parameters
         ----------
