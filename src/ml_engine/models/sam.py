@@ -59,7 +59,7 @@ class SparsePointsSamPredictor:
         self.class_to_points: Dict[str, NDArray] = {}       # Mapping from class names to (x, y) coordinates
 
         # Mask logits predicted. Shape: (n_classes, H, W)
-        self.mask_logits: torch.Tensor = torch.empty(0, 0, 0, device=self.device, dtype=torch.float32)
+        # self.mask_logits: torch.Tensor = torch.empty(0, 0, 0, device=self.device, dtype=torch.float32)
         
         # Private attributes
         # ---------------------------------------------------
@@ -204,16 +204,18 @@ class SparsePointsSamPredictor:
         if (self._img_height == 0) or (self._img_width == 0):
             raise ValueError("Image embedding has not been set. Use 'set_input()' method first.")
 
-        # Run predictions for each class
+        # Log the inference mode
         if use_background_prompts:
             logger.info("Running per-class predictions using background input prompts")
         else:
             logger.info("Running per-class predictions")
-        self._predict(use_background_prompts)
+        
+        # Run predictions for each class
+        mask_logits = self._predict(use_background_prompts)
 
         # Post-process the predictions
         logger.info("Post-processing the predictions")
-        results = self._postprocess()
+        results = self._postprocess(mask_logits)
 
         # Clear GPU memory
         if self.device == "cuda":
@@ -253,29 +255,22 @@ class SparsePointsSamPredictor:
         logger.info(f"Total input points: {len(input_points)}")
 
         # Set SAM embedding
-        start_time = time.perf_counter()
+        t0 = time.perf_counter()
         try:
             logger.info("Calculating the image embeddings")
             self.predictor.set_image(image=image, image_format=image_format)
+            self._img_height, self._img_width = image.shape[:2]
             # self._image = image
         except Exception as e:
             if self.device == "cuda":
                 torch.cuda.empty_cache()
             raise ValueError(f"Fail to calculate image embedding: {e}.") from e
-        finally:
-            embeddings_time = time.perf_counter() - start_time
+        
+        # Update the processing time for embeddings
+        embeddings_time = time.perf_counter() - t0
         self.processing_times["embeddings"] = embeddings_time
         logger.info(f"Image embeddings calculated in {embeddings_time:.3f} seconds")
 
-        # Initialize a logit tensor for all classes
-        # Fill with a very low value so that unpredicted classes don't win argmax
-        self._img_height, self._img_width = image.shape[:2]
-        self.mask_logits = torch.full(
-            size=(len(self._class_names), self._img_height, self._img_width),
-            fill_value=-float("inf"),
-            device=self.device,
-            dtype=torch.float32
-        )
 
     def _get_class_points(self, class_name: str, include_background: bool) -> Tuple[NDArray, NDArray]:
         """
@@ -341,26 +336,35 @@ class SparsePointsSamPredictor:
 
         return input_points, input_labels
 
-    def _predict(self, include_background: bool = False):
+    def _predict(self, include_background: bool) -> torch.Tensor:
         """
-        Runs SAM predictor for each class present in the image's training dataframe subset.
+        Runs SAM predictor for each class.
+
+        Parameters
+        ----------
+        include_background : bool, optional
+            Whether to include background points in the input prompts for each class.
 
         Returns
         -------
-        tuple
-            Two elements tuple:
-
-            1. Dictionary containing the below keys. This might be None if any failure occur:
-
-            - "proba": tensor with class probabilities of shape (n_classes, height, width).
-            - "labels": tensor with argmax predictions of shape (height, width).
-            - "class_points": dictionary mapping class names to their corresponding selected
-            coordinates as `numpy` arrays of shape (N, 2) with (x, y) coordinates.
-
-            2. Boolean flag to know if the process was successful.
+        torch.Tensor
+            A tensor of shape (n_classes, height, width) containing the predicted logits 
+            for each class. 
+            
+            The logits are un-thresholded values that can be used to compute the final 
+            class labels using ``argmax``.
         """
         # The accumulated prediction time for all classes
         final_prediction_time = 0.0
+
+        # Initialize a logit tensor for all classes
+        # Fill with a very low value so that unpredicted classes don't win argmax
+        mask_logits = torch.full(
+            size=( len(self._class_names), self._img_height, self._img_width ),
+            fill_value=-float("inf"),
+            device=self.device,
+            dtype=torch.float32
+        )
 
         # Per-class inference
         for class_name in self._class_names:
@@ -409,7 +413,7 @@ class SparsePointsSamPredictor:
                         )
 
                 # Store the logits in the class index slot
-                self.mask_logits[class_idx, :, :] = torch.from_numpy(masks_logits).squeeze()
+                mask_logits[class_idx, :, :] = torch.from_numpy(masks_logits).squeeze()
 
             except Exception as e:
                 raise ValueError(f"('{class_name}') Failed to make SAM predictions: {e}") from e
@@ -418,9 +422,11 @@ class SparsePointsSamPredictor:
         self.processing_times["predictions"] = final_prediction_time
         logger.info(f"Total prediction time: {final_prediction_time:.4f} seconds")
 
-    def _postprocess(self) -> Dict[str, NDArray]:
+        return mask_logits
+
+    def _postprocess(self, mask_logits: torch.Tensor) -> Dict[str, NDArray]:
         # Check if argmax resulted in -inf (i.e., no class positively predicted)
-        logit_max_values, logit_max_indices = torch.max(input=self.mask_logits, dim=0)
+        logit_max_values, logit_max_indices = torch.max(input=mask_logits, dim=0)
         n_unpredicted = torch.sum(logit_max_values == -float("inf")).item()
         if n_unpredicted > 0:
             logger.warning(
@@ -430,9 +436,9 @@ class SparsePointsSamPredictor:
 
         # Get labels from predicted logits
         logger.debug("Generating prediction map using argmax on aligned logits")
-        mask_labels = torch.argmax(input=self.mask_logits, dim=0)   # Shape: (H, W)
+        mask_labels = torch.argmax(input=mask_logits, dim=0)   # Shape: (H, W)
 
         return {
-            "logits": self.mask_logits.cpu().numpy(),
+            "logits": mask_logits.cpu().numpy(),
             "labels": mask_labels.cpu().numpy().astype(int)
         }
