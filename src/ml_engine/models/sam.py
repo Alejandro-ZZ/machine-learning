@@ -22,13 +22,17 @@ logger = logging.getLogger("SAM")
 
 class SparsePointsSamPredictor:
     """
-    A custom SAM predictor for handling multi-class sparse point inputs.
+    A custom Segment Anything Model (SAM) for handling multi-class sparse point inputs.
+    See:
+
+    * [Segment Anything GitHub Repo](https://github.com/facebookresearch/segment-anything/tree/main)
 
     Parameters
     ----------
     predictor : SamPredictor
-        An instance of the SAM predictor from the `segment_anything` library.
-        See: https://github.com/facebookresearch/segment-anything/blob/main/segment_anything/predictor.py
+        An instance of the 
+        [SAM predictor](https://github.com/facebookresearch/segment-anything/blob/main/segment_anything/predictor.py) 
+        from the `segment_anything` library.
     
     device : str, optional
         The device to use for the predictor. It can be either "cpu" or "cuda".
@@ -179,15 +183,58 @@ class SparsePointsSamPredictor:
         # Preprocess the input data
         self._preprocess(image, input_points, target_labels, sorted_classes, image_format)
 
-    def make_inference(self, use_background_prompts: bool = False):
+    def make_inference(
+            self,
+            include_background: bool,
+            normalize: bool = True,
+            weight_by_scores: bool = False,
+            ignore_label: Optional[int] = None,
+            foreground_threshold: float = 0.0,
+            background_ratio: Optional[float] = None,
+            random_seed: int = 23
+    ) -> Dict[str, NDArray]:
         """
         Runs the SAM predictor on the input image and returns the predicted logits and labels.
 
+        SAM is trained for promptable binary segmentation, so the raw logits of the independent
+        per-class forward passes (each with a different prompt configuration) are not guaranteed
+        to be calibrated or comparable across classes. The resulting ``"labels"`` map is therefore
+        a heuristic. The options ``normalize`` and ``weight_by_scores`` can be used to mitigate 
+        this issue and improve the comparability of the logits across classes.
+
         Parameters
         ----------
-        use_background_prompts : bool, optional
-            If True, include background points (negative points) in the input prompts.
+        include_background : bool
+            If True, include background points (negative prompts) in the model input.
             Default is False.
+
+        normalize : bool, optional
+            If True (default), the per-class logits are mapped to probabilities with a sigmoid
+            before being compared across classes. If False, SamPredictor raw logits are compared directly.
+
+        weight_by_scores : bool, optional
+            If True, the sigmoid probabilities of each class are multiplied by the SAM predicted
+            mask quality score (IoU prediction) of that class before comparing them.
+            Requires ``normalize=True``. Default is False.
+
+        ignore_label : int, optional
+            Label assigned to pixels where no class is predicted as foreground (every class logit is
+            below ``foreground_threshold``). Must be outside ``[0, n_classes - 1]``.
+            If None (default), every pixel is assigned to a class by argmax (legacy behavior).
+
+        foreground_threshold : float, optional
+            Raw logit threshold above which a pixel is considered foreground for a class. 
+            Default to the SAM ``mask_threshold`` value (0.0, equivalent to a probability of 0.5).
+
+        background_ratio : float, optional
+            Only used if ``include_background`` is True. Maximum number of negative points per
+            positive point in each class' prompt. For instance, 1.0 balances positives and negatives,
+            and 0.0 removes all negatives. Negatives are randomly sampled, spread evenly among the other
+            classes. If None (default), all negative points are used. If there are fewer negatives
+            than requested, all of them are used.
+
+        random_seed : int, optional
+            Seed of the random negative points sampling. Default is 23.
 
         Returns
         -------
@@ -195,27 +242,60 @@ class SparsePointsSamPredictor:
             Dictionary containing the predictions:
 
             *   "logits" (NDArray): predicted raw logits for each class with
-                shape (n_classes, height, width).
+                shape (n_classes, height, width). Classes without input points are filled with ``-inf``.
 
-            *   "labels" (NDArray): post-processed logits for each pixel with shape (height, width).
-                This is obtained by taking the argmax over the raw logits along the class dimension.
+            *   "labels" (NDArray): class index of each pixel with shape (height, width), obtained by
+                taking the argmax of ``"scores"`` among the classes predicted as foreground.
+                Pixels with no foreground class are set to ``ignore_label``.
+            
+            *   "scores" (NDArray): if ``normalize=True``, sigmoid probabilities (optionally IoU-weighted) 
+                with shape (n_classes, height, width). Omitted if ``normalize=False``.
+
+            *   "iou_scores" (NDArray): SAM predicted mask quality score for each class with
+                shape (n_classes,). Classes without input points have a score of 0. Currently ommited.
+
         """
         # Check if the image embedding has been set
         if (self._img_height == 0) or (self._img_width == 0):
             raise ValueError("Image embedding has not been set. Use 'set_input()' method first.")
 
+        # Check the options
+        if weight_by_scores and not normalize:
+            raise ValueError("'weight_by_scores=True' requires 'normalize=True'")
+        if (ignore_label is not None) and (0 <= ignore_label < len(self._class_names)):
+            raise ValueError(
+                f"'ignore_label' must be outside the class indices range [0, {len(self._class_names) - 1}]. "
+                f"Got: {ignore_label}"
+            )
+        if background_ratio is not None:
+            if background_ratio < 0:
+                raise ValueError(f"'background_ratio' must be >= 0. Got: {background_ratio}")
+            if not include_background:
+                logger.warning("'background_ratio' is ignored because 'include_background' is False")
+
         # Log the inference mode
-        if use_background_prompts:
+        if include_background:
             logger.info("Running per-class predictions using background input prompts")
         else:
             logger.info("Running per-class predictions")
         
         # Run predictions for each class
-        mask_logits = self._predict(use_background_prompts)
+        mask_logits, iou_scores = self._predict(include_background)
 
         # Post-process the predictions
         logger.info("Post-processing the predictions")
-        results = self._postprocess(mask_logits)
+        results = self._postprocess(
+            mask_logits,
+            iou_scores,
+            normalize=normalize,
+            weight_by_scores=weight_by_scores,
+            ignore_label=ignore_label,
+            foreground_threshold=foreground_threshold
+        )
+
+        # results.update({
+        #     "iou_scores": iou_scores.cpu().numpy(),
+        # })
 
         # Clear GPU memory
         if self.device == "cuda":
@@ -304,7 +384,6 @@ class SparsePointsSamPredictor:
 
         else:
             # Get positive class data
-            class_idx = self._class_names.index(class_name)
             positive_points = self.class_to_points[class_name]
 
             # Create the input points and labels
@@ -314,21 +393,21 @@ class SparsePointsSamPredictor:
             input_labels_list.append(numpy.ones(shape=len(positive_points), dtype=int))
 
             # Include negative points in the input points prompt
-            negative_points = numpy.array([])
             if include_background:
-                negative_classes = set(self._class_names) - {class_name}
+                # Ordered list (not a set) so the sampling is reproducible
                 negative_list = [
                     self.class_to_points[negative_class]
-                    for negative_class in negative_classes
-                    if negative_class in self.class_to_points
+                    for negative_class in self._class_names
+                    if (negative_class != class_name) and (negative_class in self.class_to_points)
                 ]
-                negative_points = numpy.vstack(negative_list)
-                if len(negative_points) > 0:
-                    input_points_list.append(negative_points)
-                    input_labels_list.append(numpy.zeros(shape=len(negative_points), dtype=int))
-                    # logger.debug(f"Background points included for class '{class_name}': {len(negative_points)}")
+
+                # Include negative points
+                if len(negative_list) > 0:
+                    input_points_list.append( numpy.vstack(negative_list) )
+                    input_labels_list.append(numpy.zeros(shape=len(negative_list), dtype=int))
+
                 else:
-                    logger.warning(f"No background points available for class '{class_name}'")
+                    logger.warning(f"('{class_name}') No background points available")
 
             # Create the inputs as arrays
             input_points = numpy.vstack(input_points_list)
@@ -336,7 +415,10 @@ class SparsePointsSamPredictor:
 
         return input_points, input_labels
 
-    def _predict(self, include_background: bool) -> torch.Tensor:
+    def _predict(
+            self,
+            include_background: bool
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Runs SAM predictor for each class.
 
@@ -347,12 +429,15 @@ class SparsePointsSamPredictor:
 
         Returns
         -------
-        torch.Tensor
-            A tensor of shape (n_classes, height, width) containing the predicted logits 
-            for each class. 
-            
-            The logits are un-thresholded values that can be used to compute the final 
-            class labels using ``argmax``.
+        Tuple[torch.Tensor, torch.Tensor]
+            A tuple containing two elements:
+
+            1.  A tensor of shape (n_classes, height, width) with the predicted logits for
+                each class. The logits are un-thresholded values. Classes without input points
+                are filled with ``-inf``.
+
+            2.  A tensor of shape (n_classes,) with the SAM predicted mask quality score
+                of each class (0 for classes without input points).
         """
         # The accumulated prediction time for all classes
         final_prediction_time = 0.0
@@ -365,6 +450,7 @@ class SparsePointsSamPredictor:
             device=self.device,
             dtype=torch.float32
         )
+        iou_scores = torch.zeros(len(self._class_names), device=self.device, dtype=torch.float32)
 
         # Per-class inference
         for class_name in self._class_names:
@@ -388,10 +474,10 @@ class SparsePointsSamPredictor:
                 with torch.no_grad():
                     # Make predictions using the SAM predictor
                     #       masks_logits --> array of shape: (n_masks, height, width)
-                    #             scores --> array of shape: (n_masks, )
+                    #        mask_scores --> array of shape: (n_masks, )
                     #   low_res_logits --> array of shape: (n_masks, 256, 256)
                     t0 = time.perf_counter()
-                    masks_logits, scores, low_res_logits = self.predictor.predict(
+                    masks_logits, mask_scores, low_res_logits = self.predictor.predict(
                         point_coords=input_points,
                         point_labels=input_labels,
                         multimask_output=False,     # Output a single best mask/logit (n_masks=1)
@@ -412,8 +498,9 @@ class SparsePointsSamPredictor:
                             f"Expected: {(1, self._img_height, self._img_width)}"
                         )
 
-                # Store the logits in the class index slot
+                # Store the logits and the quality score in the class index slot
                 mask_logits[class_idx, :, :] = torch.from_numpy(masks_logits).squeeze()
+                iou_scores[class_idx] = float(mask_scores[0])
 
             except Exception as e:
                 raise ValueError(f"('{class_name}') Failed to make SAM predictions: {e}") from e
@@ -422,23 +509,198 @@ class SparsePointsSamPredictor:
         self.processing_times["predictions"] = final_prediction_time
         logger.info(f"Total prediction time: {final_prediction_time:.4f} seconds")
 
-        return mask_logits
+        return mask_logits, iou_scores
 
-    def _postprocess(self, mask_logits: torch.Tensor) -> Dict[str, NDArray]:
-        # Check if argmax resulted in -inf (i.e., no class positively predicted)
-        logit_max_values, logit_max_indices = torch.max(input=mask_logits, dim=0)
-        n_unpredicted = torch.sum(logit_max_values == -float("inf")).item()
-        if n_unpredicted > 0:
-            logger.warning(
-                f"There are {n_unpredicted} pixels with no class predicted (max logit was -inf)."
-                f"They will be assigned an arbitrary class index by argmax (usually 0)."
-            )
+    def _postprocess(
+            self,
+            class_logits: torch.Tensor,
+            iou_scores: torch.Tensor,
+            normalize: bool,
+            weight_by_scores: bool,
+            ignore_label: Optional[int],
+            foreground_threshold: float
+    ) -> Dict[str, NDArray]:
+        """
+        Post-process the predicted logits and generate the final prediction map.
 
-        # Get labels from predicted logits
-        logger.debug("Generating prediction map using argmax on aligned logits")
-        mask_labels = torch.argmax(input=mask_logits, dim=0)   # Shape: (H, W)
+        Parameters
+        ----------
+        class_logits : torch.Tensor
+            Predicted raw logits for each class with shape (n_classes, height, width).
+        
+        iou_scores : torch.Tensor
+            SAM predicted mask quality score for each class with shape (n_classes, ).
+        
+        normalize : bool
+            Whether to normalize the logits before post-processing using the sigmoid function.
+        
+        weight_by_scores : bool
+            Whether to weight the normalized logits by the IoU scores before post-processing.
 
-        return {
-            "logits": mask_logits.cpu().numpy(),
-            "labels": mask_labels.cpu().numpy().astype(int)
+        ignore_label : int, optional
+            Label assigned to pixels where no class is predicted as foreground (every class logit is
+            below ``foreground_threshold``). Must be outside ``[0, n_classes - 1]``.
+        
+        foreground_threshold : float
+            Raw logit threshold above which a pixel is considered foreground for a class.
+            Ignored if ``ignore_label`` is None.
+        
+        Returns
+        -------
+        Dict[str, NDArray]
+            The post-processed predictions:
+
+            *   "logits" (NDArray): predicted raw logits for each class with
+                shape (n_classes, height, width). Classes without input points are filled with ``-inf``.
+
+            *   "labels" (NDArray): class index of each pixel with shape (height, width), obtained by
+                taking the argmax of ``"scores"`` among the classes predicted as foreground.
+                Pixels with no foreground class are set to ``ignore_label``.
+                
+            *   "scores" (NDArray): if ``normalize=True``, sigmoid probabilities (optionally IoU-weighted) 
+                with shape (n_classes, height, width). Omitted if ``normalize=False``.
+
+        """
+        # Values compared across classes
+        # class_scores --> Shape: (n_classes, H, W)
+        class_scores = class_logits
+        if normalize:
+            class_scores = torch.sigmoid(class_logits)  # `-inf` maps to 0
+            if weight_by_scores:
+                class_scores = class_scores * iou_scores.view(-1, 1, 1)
+
+        candidates = class_scores
+        if ignore_label is not None:
+            # Only classes predicted as foreground compete for the pixel
+            candidates = class_scores.masked_fill(class_logits < foreground_threshold, -float("inf"))
+
+        # Get labels from the scores
+        logger.debug("Generating prediction map using argmax on class scores")
+        max_scores, mask_labels = torch.max(input=candidates, dim=0)   # Shape: (H, W)
+
+        # Pixels where no class is predicted
+        unassigned = max_scores == -float("inf")
+        n_unassigned = int(unassigned.sum().item())
+        if n_unassigned > 0:
+            if ignore_label is not None:
+                logger.info(f"{n_unassigned} pixels have no foreground class. Labeled as {ignore_label}")
+                mask_labels = mask_labels.masked_fill(unassigned, ignore_label)
+            else:
+                logger.warning(
+                    f"There are {n_unassigned} pixels with no class predicted (max score was -inf). "
+                    f"They will be assigned an arbitrary class index by argmax (usually 0)."
+                )
+
+        results = {
+            "logits": class_logits.cpu().numpy(),
+            "labels": mask_labels.cpu().numpy().astype(int),
         }
+        if normalize:
+            results["scores"] = class_scores.cpu().numpy()
+
+        return results
+
+
+def plot_class_logit_distributions(
+        logits: NDArray,
+        class_names: List[str],
+        threshold: float = 0.0,
+        max_samples: int = 200_000,
+        bins: int = 100,
+        random_seed: Optional[int] = 0,
+        figsize: Tuple[float, float] = (14, 5)
+) -> Tuple[Any, Dict[str, Dict[str, float]]]:
+    """
+    Plot the per-class raw logit distributions to check whether their scales are comparable.
+
+    Two panels are drawn: overlaid density histograms and box plots. If the classes show clearly
+    different locations or spreads, a direct argmax across the logits is not reliable.
+
+    Parameters
+    ----------
+    logits : NDArray
+        Raw logits with shape (n_classes, height, width), as in the ``"logits"`` output of
+        ``SparsePointsSamPredictor.make_inference``. Non-finite values (e.g. classes skipped
+        for lack of input points) are ignored.
+
+    class_names : List[str]
+        Class names ordered by class index.
+
+    threshold : float, optional
+        Foreground logit threshold, drawn as a vertical line. Default is 0.0 (SAM's ``mask_threshold``).
+
+    max_samples : int, optional
+        Maximum number of randomly sampled pixels per class used for the plots and statistics.
+
+    bins : int, optional
+        Number of histogram bins.
+
+    random_seed : int, optional
+        Seed for the pixel sampling.
+
+    figsize : Tuple[float, float], optional
+        Figure size.
+
+    Returns
+    -------
+    Tuple[matplotlib.figure.Figure, Dict[str, Dict[str, float]]]
+        The figure and the per-class summary statistics (``count``, ``mean``, ``std``, ``min``,
+        ``p5``, ``median``, ``p95``, ``max`` and ``foreground_fraction``, the fraction of pixels
+        with a logit above ``threshold``).
+    """
+    import matplotlib.pyplot as plt
+
+    if logits.ndim != 3 or logits.shape[0] != len(class_names):
+        raise ValueError(
+            f"Expected logits with shape (n_classes={len(class_names)}, H, W). Got: {logits.shape}"
+        )
+
+    rng = numpy.random.default_rng(random_seed)
+    samples: Dict[str, NDArray] = {}
+    stats: Dict[str, Dict[str, float]] = {}
+    for idx, class_name in enumerate(class_names):
+        values = logits[idx].ravel()
+        values = values[numpy.isfinite(values)]
+        if values.size == 0:
+            logger.warning(f"('{class_name}') No finite logits to plot, skipping")
+            continue
+        if values.size > max_samples:
+            values = rng.choice(values, size=max_samples, replace=False)
+
+        samples[class_name] = values
+        p5, median, p95 = numpy.percentile(values, [5, 50, 95])
+        stats[class_name] = {
+            "count": int(values.size),
+            "mean": float(values.mean()),
+            "std": float(values.std()),
+            "min": float(values.min()),
+            "p5": float(p5),
+            "median": float(median),
+            "p95": float(p95),
+            "max": float(values.max()),
+            "foreground_fraction": float(numpy.mean(values >= threshold)),
+        }
+
+    fig, axes = plt.subplots(1, 2, figsize=figsize)
+    ax_hist, ax_box = axes[0], axes[1]
+    if samples:
+        all_values = numpy.concatenate(list(samples.values()))
+        bin_edges = numpy.linspace(all_values.min(), all_values.max(), bins + 1)
+        for class_name, values in samples.items():
+            ax_hist.hist(values, bins=bin_edges, density=True, alpha=0.4, label=class_name)
+        ax_box.boxplot(list(samples.values()), showfliers=False)
+        ax_box.set_xticks(range(1, len(samples) + 1))
+        ax_box.set_xticklabels(list(samples.keys()), rotation=45)
+
+    for ax in (ax_hist, ax_box):
+        axis_line = ax.axvline if ax is ax_hist else ax.axhline
+        axis_line(threshold, color="k", linestyle="--", linewidth=1, label=f"threshold = {threshold:g}")
+    ax_hist.set_xlabel("Raw logit")
+    ax_hist.set_ylabel("Density")
+    ax_hist.set_title("Per-class logit distributions")
+    ax_hist.legend()
+    ax_box.set_ylabel("Raw logit")
+    ax_box.set_title("Per-class logit spread")
+    fig.tight_layout()
+
+    return fig, stats
