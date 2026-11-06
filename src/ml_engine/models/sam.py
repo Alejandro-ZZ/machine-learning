@@ -393,8 +393,9 @@ class SparsePointsSamPredictor:
 
                 # Include negative points
                 if len(negative_list) > 0:
-                    input_points_list.append( numpy.vstack(negative_list) )
-                    input_labels_list.append(numpy.zeros(shape=len(negative_list), dtype=int))
+                    negative_points = numpy.vstack(negative_list)
+                    input_points_list.append(negative_points)
+                    input_labels_list.append(numpy.zeros(shape=len(negative_points), dtype=int))
 
                 else:
                     logger.warning(f"('{class_name}') No background points available")
