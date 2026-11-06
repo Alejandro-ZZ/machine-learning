@@ -22,8 +22,8 @@ from typing import (
     Union
 )
 
-from ml_engine.datasets.base_dataset import OptimizationData
-from ml_engine.optuna.base_optimizer import BaseOptunaOptimizer, OptunaParamSpec
+from ml_engine.datasets.base import OptimizationData
+from ml_engine.optuna.base import BaseOptunaOptimizer, OptunaParamSpec
 
 
 logger = logging.getLogger("SklearnOptunaOptimizer")
