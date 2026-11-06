@@ -461,20 +461,36 @@ class SparsePointsSamPredictor:
                     f"backgrounds={numpy.sum(input_labels == 0)}"
                 )
 
+                # Determine whether prompt is ambiguous (single point vs multi-point) 
+                is_ambiguous = len(input_points) == 1
+
                 with torch.no_grad():
                     # Make predictions using the SAM predictor
                     #       masks_logits --> array of shape: (n_masks, height, width)
                     #        mask_scores --> array of shape: (n_masks, )
-                    #   low_res_logits --> array of shape: (n_masks, 256, 256)
+                    #     low_res_logits --> array of shape: (n_masks, 256, 256)
                     t0 = time.perf_counter()
                     masks_logits, mask_scores, low_res_logits = self.predictor.predict(
                         point_coords=input_points,
                         point_labels=input_labels,
-                        multimask_output=False,     # Output a single best mask/logit (n_masks=1)
-                        return_logits=True,         # Get un-thresholded masks logits instead of a binary mask
+                        multimask_output=is_ambiguous,  # Output a single best mask/logit (n_masks=1) for ambiguous prompts, otherwise output 3 masks/logits (n_masks=3)
+                        return_logits=True,             # Get un-thresholded masks logits instead of a binary mask
                     )
                     predictions_time = time.perf_counter() - t0
-                    
+
+                    # Handle ambiguous vs non-ambiguous prompts
+                    # masks_logits new shape: (height, width) 
+                    iou_score: float = 0
+                    if is_ambiguous: 
+                        # Pick the mask with the highest predicted IoU score 
+                        best_mask_idx = numpy.argmax(mask_scores) 
+                        masks_logits = masks_logits[best_mask_idx]
+                        iou_score = float(mask_scores[best_mask_idx])
+                    else: 
+                        # Take the first mask/logits for non-ambiguous prompts
+                        masks_logits = masks_logits[0]
+                        iou_score = float(mask_scores[0])
+
                     # Update the prediction time
                     # self.processing_times["predictions"] = predictions_time
                     self.prediction_times[class_name] = predictions_time
@@ -482,15 +498,15 @@ class SparsePointsSamPredictor:
                     logger.debug(f"('{class_name}') Prediction time: {predictions_time:.4f} seconds")
 
                     # Check expected output shapes
-                    if masks_logits.shape != (1, self._img_height, self._img_width):
+                    if masks_logits.shape != (self._img_height, self._img_width):
                         raise ValueError(
                             f"Unexpected predicted masks shape. Got: {masks_logits.shape}. "
-                            f"Expected: {(1, self._img_height, self._img_width)}"
+                            f"Expected: {(self._img_height, self._img_width)}"
                         )
 
                 # Store the logits and the quality score in the class index slot
                 mask_logits[class_idx, :, :] = torch.from_numpy(masks_logits).squeeze()
-                iou_scores[class_idx] = float(mask_scores[0])
+                iou_scores[class_idx] = iou_score
 
             except Exception as e:
                 raise ValueError(f"('{class_name}') Failed to make SAM predictions: {e}") from e
