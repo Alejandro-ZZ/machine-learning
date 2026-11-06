@@ -189,9 +189,7 @@ class SparsePointsSamPredictor:
             normalize: bool = True,
             weight_by_scores: bool = False,
             ignore_label: Optional[int] = None,
-            foreground_threshold: float = 0.0,
-            background_ratio: Optional[float] = None,
-            random_seed: int = 23
+            foreground_threshold: Optional[float] = None
     ) -> Dict[str, NDArray]:
         """
         Runs the SAM predictor on the input image and returns the predicted logits and labels.
@@ -223,18 +221,12 @@ class SparsePointsSamPredictor:
             If None (default), every pixel is assigned to a class by argmax (legacy behavior).
 
         foreground_threshold : float, optional
-            Raw logit threshold above which a pixel is considered foreground for a class. 
-            Default to the SAM ``mask_threshold`` value (0.0, equivalent to a probability of 0.5).
-
-        background_ratio : float, optional
-            Only used if ``include_background`` is True. Maximum number of negative points per
-            positive point in each class' prompt. For instance, 1.0 balances positives and negatives,
-            and 0.0 removes all negatives. Negatives are randomly sampled, spread evenly among the other
-            classes. If None (default), all negative points are used. If there are fewer negatives
-            than requested, all of them are used.
-
-        random_seed : int, optional
-            Seed of the random negative points sampling. Default is 23.
+            Raw logit threshold; a pixel is foreground for a class only if its raw logit is strictly
+            greater than it, as in SAM's ``masks > mask_threshold``. It is always applied to the raw
+            logits, never to the sigmoid/IoU-weighted scores, so it is independent of ``normalize``
+            and ``weight_by_scores``. Only used if ``ignore_label`` is not None.
+            If None (default), the SAM model ``mask_threshold`` is used (0.0, equivalent to a 
+            sigmoid probability of 0.5).
 
         Returns
         -------
@@ -267,11 +259,9 @@ class SparsePointsSamPredictor:
                 f"'ignore_label' must be outside the class indices range [0, {len(self._class_names) - 1}]. "
                 f"Got: {ignore_label}"
             )
-        if background_ratio is not None:
-            if background_ratio < 0:
-                raise ValueError(f"'background_ratio' must be >= 0. Got: {background_ratio}")
-            if not include_background:
-                logger.warning("'background_ratio' is ignored because 'include_background' is False")
+
+        if foreground_threshold is None:
+            foreground_threshold = float(getattr(self.predictor.model, "mask_threshold", 0.0))
 
         # Log the inference mode
         if include_background:
@@ -542,8 +532,8 @@ class SparsePointsSamPredictor:
             below ``foreground_threshold``). Must be outside ``[0, n_classes - 1]``.
         
         foreground_threshold : float
-            Raw logit threshold above which a pixel is considered foreground for a class.
-            Ignored if ``ignore_label`` is None.
+            Raw logit threshold; a pixel is foreground for a class only if its raw logit is strictly
+            greater than it (as in SAM). Ignored if ``ignore_label`` is None.
         
         Returns
         -------
@@ -563,7 +553,7 @@ class SparsePointsSamPredictor:
         """
         # Values compared across classes
         # class_scores --> Shape: (n_classes, H, W)
-        class_scores = class_logits
+        class_scores = class_logits.clone() # TODO: Duplicate memory, but avoids in-place operations on the original logits
         if normalize:
             class_scores = torch.sigmoid(class_logits)  # `-inf` maps to 0
             if weight_by_scores:
@@ -571,8 +561,9 @@ class SparsePointsSamPredictor:
 
         candidates = class_scores
         if ignore_label is not None:
-            # Only classes predicted as foreground compete for the pixel
-            candidates = class_scores.masked_fill(class_logits < foreground_threshold, -float("inf"))
+            # Only classes predicted as foreground compete for the pixel. The threshold is applied on
+            # the raw logits (strict `>`, like SAM), so it does not depend on normalization or weighting
+            candidates = class_scores.masked_fill(class_logits <= foreground_threshold, -float("inf"))
 
         # Get labels from the scores
         logger.debug("Generating prediction map using argmax on class scores")
