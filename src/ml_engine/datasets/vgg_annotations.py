@@ -21,9 +21,11 @@ from numpy.typing import NDArray
 from pathlib import Path
 from scipy.spatial import KDTree
 from shapely.geometry.base import BaseGeometry
+from shapely.geometry.linestring import LineString
+from shapely.geometry.polygon import Polygon
 from shapely.plotting import plot_polygon, plot_line, plot_points
 from skimage import draw, io
-from typing import Any, Dict, Optional, List, Self, Tuple, Union
+from typing import Any, cast, Dict, Optional, List, Self, Tuple, Union
 
 
 # TODO: Debugging code for testing the VggRegion class
@@ -728,9 +730,9 @@ class VggImageAnnotations:
             # Draw the region gometry
             geom = vgg_region.geometry()
             if geom.geom_type == "Polygon":
-                plot_polygon(polygon=geom, ax=ax, color=color_value)
+                plot_polygon(polygon=cast(Polygon, geom), ax=ax, color=color_value)
             elif geom.geom_type == "LineString":
-                plot_line(line=geom, ax=ax, color=color_value)
+                plot_line(line=cast(LineString, geom), ax=ax, color=color_value)
             elif geom.geom_type == "Point":
                 plot_points(geom=geom, ax=ax, color=color_value)
 
