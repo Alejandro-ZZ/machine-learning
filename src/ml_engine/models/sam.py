@@ -197,10 +197,11 @@ class SparsePointsSamPredictor:
             normalize: bool = True,
             weight_by_scores: bool = False,
             ignore_label: Optional[int] = None,
-            mask_threshold: Optional[float] = None
+            mask_threshold: Optional[float] = None,
+            verbose: bool = False
     ) -> NDArray:
         """
-        Runs the SAM predictor on the input image and returns the predicted logits and labels.
+        Runs the SAM predictor on the input image and returns the predicted labels.
 
         SAM is trained for promptable binary segmentation, so the raw logits of the independent
         per-class forward passes (each with a different prompt configuration) are not guaranteed
@@ -235,6 +236,10 @@ class SparsePointsSamPredictor:
             
             Only used if ``ignore_label`` is not None. If None (default), the default SAM model 
             ``mask_threshold`` value is used (0.0, equivalent to a sigmoid probability of 0.5).
+        
+        verbose : bool, optional
+            Whether to print verbose output during prediction. If True, information is 
+            logged using ``logging.INFO`` level. Default is False.
 
         Returns
         -------
@@ -251,23 +256,26 @@ class SparsePointsSamPredictor:
             raise ValueError("Image embedding has not been set. Use 'set_input()' method first.")
 
         # Log the inference mode
-        if include_background:
-            logger.info("Running per-class predictions using background input prompts")
-        else:
-            logger.info("Running per-class predictions")
+        if verbose:
+            add_txt = "(using background)" if include_background else "(only foreground)"
+            logger.info(f"Running per-class predictions {add_txt}")
         
         # Run predictions for each class
-        mask_logits, iou_scores = self._predict(include_background)
+        mask_logits, iou_scores = self.predict(include_background, verbose)
+        if verbose:
+            logger.info("Processing the predictions")
 
         # Post-process the predictions
-        logger.info("Post-processing the predictions")
-        results = self._postprocess(
+        if verbose:
+            logger.info("Post-processing the predictions")
+        results = self.postprocess(
             mask_logits,
             iou_scores,
             normalize=normalize,
             weight_by_scores=weight_by_scores,
             ignore_label=ignore_label,
-            mask_threshold=mask_threshold
+            mask_threshold=mask_threshold,
+            verbose=verbose
         )
 
         # Clear GPU memory
@@ -392,9 +400,10 @@ class SparsePointsSamPredictor:
         return input_points, input_labels
 
     # TODO: Declare as public member so we can test different post-processing strategies without re-running the predictions
-    def _predict(
+    def predict(
             self,
-            include_background: bool
+            include_background: bool,
+            verbose: bool = False
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Runs SAM predictor for each class.
@@ -403,6 +412,10 @@ class SparsePointsSamPredictor:
         ----------
         include_background : bool, optional
             Whether to include background points in the input prompts for each class.
+        
+        verbose : bool, optional
+            Whether to print verbose output during prediction. If True, information is 
+            logged using ``logging.INFO`` level. Default is False.
 
         Returns
         -------
@@ -440,13 +453,14 @@ class SparsePointsSamPredictor:
             try:
                 # Log the number of input points for the class
                 class_idx = self._class_names.index(class_name)
-                logger.debug(
-                    f"('{class_name}') Predicting mask: "
-                    f"id={class_idx}, "
-                    f"total_points={len(input_points)}, "
-                    f"foregrounds={numpy.sum(input_labels == 1)}, "
-                    f"backgrounds={numpy.sum(input_labels == 0)}"
-                )
+                if verbose:
+                    logger.info(
+                        f"('{class_name}') Predicting mask: "
+                        f"id={class_idx}, "
+                        f"total_points={len(input_points)}, "
+                        f"foregrounds={numpy.sum(input_labels == 1)}, "
+                        f"backgrounds={numpy.sum(input_labels == 0)}"
+                    )
 
                 # Determine whether prompt is ambiguous (single point vs multi-point) 
                 is_ambiguous = len(input_points) == 1
@@ -482,7 +496,8 @@ class SparsePointsSamPredictor:
                     # self.processing_times["predictions"] = predictions_time
                     self.prediction_times[class_name] = predictions_time
                     final_prediction_time += predictions_time
-                    logger.debug(f"('{class_name}') Prediction time: {predictions_time:.4f} seconds")
+                    if verbose:
+                        logger.info(f"('{class_name}') Prediction time: {predictions_time:.4f} seconds")
 
                     # Check expected output shapes
                     if masks_logits.shape != (self._img_height, self._img_width):
@@ -500,18 +515,20 @@ class SparsePointsSamPredictor:
 
         # Update the final prediction time
         self.processing_times["predictions"] = final_prediction_time
-        logger.info(f"Total prediction time: {final_prediction_time:.4f} seconds")
+        if verbose:
+            logger.info(f"Total prediction time: {final_prediction_time:.4f} seconds")
 
         return mask_logits, iou_scores
 
-    def _postprocess(
+    def postprocess(
             self,
             class_logits: torch.Tensor,
             iou_scores: torch.Tensor,
             normalize: bool,
             weight_by_scores: bool,
             ignore_label: Optional[int],
-            mask_threshold: Optional[float] = None
+            mask_threshold: Optional[float] = None,
+            verbose: bool = False
     ) -> Dict[str, NDArray]:
         """
         Post-process the predicted logits and generate the final prediction map.
@@ -541,6 +558,10 @@ class SparsePointsSamPredictor:
             
             Only used if ``ignore_label`` is not None. If None (default), the default SAM model 
             ``mask_threshold`` value is used (0.0, equivalent to a sigmoid probability of 0.5).
+        
+        verbose : bool, optional
+            Whether to print verbose output during prediction. If True, information is 
+            logged using ``logging.INFO`` level. Default is False.
         
         Returns
         -------
@@ -587,7 +608,8 @@ class SparsePointsSamPredictor:
             candidates = class_scores.masked_fill(class_logits <= mask_threshold, -float("inf"))
 
         # Get labels from the scores
-        logger.debug("Generating prediction map using argmax on class scores")
+        if verbose:
+            logger.info(f"Applying argmax on class scores: threshold={mask_threshold}, ignore_label={ignore_label}")
         max_scores, mask_labels = torch.max(input=candidates, dim=0)   # Shape: (H, W)
 
         # Pixels where no class is predicted
@@ -595,7 +617,7 @@ class SparsePointsSamPredictor:
         n_unassigned = int(unassigned.sum().item())
         if n_unassigned > 0:
             if ignore_label is not None:
-                logger.info(f"{n_unassigned} pixels have no foreground class. Labeled as {ignore_label}")
+                logger.warning(f"{n_unassigned} pixels have no foreground class. Labeled as {ignore_label}")
                 mask_labels = mask_labels.masked_fill(unassigned, ignore_label)
             else:
                 logger.warning(
