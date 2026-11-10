@@ -93,6 +93,120 @@ class SparsePointsSamPredictor:
         return str(self)
 
 
+    # Private methods
+    # --------------------------------------------------------------
+    def _preprocess(
+            self,
+            image: NDArray,
+            input_points: NDArray,
+            target_labels: NDArray,
+            sorted_classes: List[str],
+            image_format: str
+    ):
+        # Update input attributes
+        self._class_names = sorted_classes
+        self.class_to_points = {}
+        # self._image = None
+        self._img_height = 0
+        self._img_width = 0
+        self._img_set = False
+
+        # Compute mapping from class names to coordinates
+        # TODO: What happens if there are no input points for a class?
+        for idx, class_name in enumerate(sorted_classes):
+            # Check if there are input points for the class
+            if idx not in target_labels:
+                logger.warning(f"No input points for class '{class_name}' (id={idx})")
+                continue
+
+            class_coords = input_points[target_labels == idx]
+            self.class_to_points[class_name] = class_coords
+            logger.debug(f"Total points for class '{class_name}': {len(class_coords)}")
+        logger.info(f"Total input points: {len(input_points)}")
+
+        # Set SAM embedding
+        t0 = time.perf_counter()
+        try:
+            logger.info("Calculating the image embeddings")
+            self.predictor.set_image(image=image, image_format=image_format)
+            self._img_height, self._img_width = image.shape[:2]
+            self._img_set = True
+            # self._image = image
+        except Exception as e:
+            if self.device == "cuda":
+                torch.cuda.empty_cache()
+            raise ValueError(f"Fail to calculate image embedding: {e}.") from e
+        
+        # Update the processing time for embeddings
+        embeddings_time = time.perf_counter() - t0
+        self.processing_times["embeddings"] = embeddings_time
+        logger.info(f"Image embeddings calculated in {embeddings_time:.3f} seconds")
+
+    def _get_class_points(self, class_name: str, include_background: bool) -> Tuple[NDArray, NDArray]:
+        """
+        Get the needed SAM's input points (coordinates and labels) for a specific class, 
+        optionally including background points.
+
+        Parameters
+        ----------
+        class_name : str
+            The name of the class for which to get the input points. 
+            Must be present in ``self._class_names`` attribute.
+        
+        include_background : bool
+            Whether to include background points in the input points.
+        
+        Returns
+        -------
+        Tuple[NDArray, NDArray]
+            A tuple containing two elements:
+            
+            1.  ``input_points``: 2D integer array of shape (N, 2) containing the ``(x, y)`` 
+                coordinates of the input points.
+            
+            2.  ``input_labels``: 1D integer array of shape (N,) containing the corresponding 
+                labels of the input points. A value of ``1`` indicates a positive point (foreground), 
+                while a value of ``0`` indicates a negative point (background).
+        """
+        if class_name not in self.class_to_points:
+            input_points = numpy.array([])
+            input_labels = numpy.array([])
+
+        else:
+            # Get positive class data
+            positive_points = self.class_to_points[class_name]
+
+            # Create the input points and labels
+            input_points_list: List[NDArray] = []
+            input_labels_list: List[NDArray] = []
+            input_points_list.append(positive_points)
+            input_labels_list.append(numpy.ones(shape=len(positive_points), dtype=int))
+
+            # Include negative points in the input points prompt
+            if include_background:
+                # Ordered list (not a set) so the sampling is reproducible
+                negative_list = [
+                    self.class_to_points[negative_class]
+                    for negative_class in self._class_names
+                    if (negative_class != class_name) and (negative_class in self.class_to_points)
+                ]
+
+                # Include negative points
+                if len(negative_list) > 0:
+                    negative_points = numpy.vstack(negative_list)
+                    input_points_list.append(negative_points)
+                    input_labels_list.append(numpy.zeros(shape=len(negative_points), dtype=int))
+
+                else:
+                    logger.warning(f"('{class_name}') No background points available")
+
+            # Create the inputs as arrays
+            input_points = numpy.vstack(input_points_list)
+            input_labels = numpy.concatenate(input_labels_list)
+
+        return input_points, input_labels
+
+
     # Public methods
     # --------------------------------------------------------------
     def set_input(
@@ -190,216 +304,6 @@ class SparsePointsSamPredictor:
         # Preprocess the input data
         self._preprocess(image, input_points, target_labels, sorted_classes, image_format)
 
-    # TODO: Add verbose option to log
-    def make_inference(
-            self,
-            include_background: bool,
-            normalize: bool = True,
-            weight_by_scores: bool = False,
-            ignore_label: Optional[int] = None,
-            mask_threshold: Optional[float] = None,
-            verbose: bool = False
-    ) -> NDArray:
-        """
-        Runs the SAM predictor on the input image and returns the predicted labels.
-
-        SAM is trained for promptable binary segmentation, so the raw logits of the independent
-        per-class forward passes (each with a different prompt configuration) are not guaranteed
-        to be calibrated or comparable across classes. The resulting ``"labels"`` map is therefore
-        a heuristic. The options ``normalize`` and ``weight_by_scores`` can be used to mitigate 
-        this issue and improve the comparability of the logits across classes.
-
-        Parameters
-        ----------
-        include_background : bool
-            If True, include background points (negative prompts) in the model input.
-            Default is False.
-
-        normalize : bool, optional
-            If True (default), the per-class logits are mapped to probabilities with a sigmoid
-            before being compared across classes. If False, SamPredictor raw logits are compared directly.
-
-        weight_by_scores : bool, optional
-            If True, the sigmoid probabilities of each class are multiplied by the SAM predicted
-            mask quality score (IoU prediction) of that class before comparing them.
-            Requires ``normalize=True``. Default is False.
-
-        ignore_label : int, optional
-            Label assigned to pixels where no class is predicted as foreground (every class logit is
-            below ``mask_threshold``). Must be outside ``[0, n_classes - 1]``.
-            If None (default), every pixel is assigned to a class by argmax (legacy behavior).
-
-        mask_threshold : float, optional
-            Raw logit threshold (``foreground = raw_logits > mask_threshold``). It is always applied 
-            to the raw logits, never to the sigmoid/IoU-weighted scores, so it is independent of 
-            ``normalize`` and ``weight_by_scores``. 
-            
-            Only used if ``ignore_label`` is not None. If None (default), the default SAM model 
-            ``mask_threshold`` value is used (0.0, equivalent to a sigmoid probability of 0.5).
-        
-        verbose : bool, optional
-            Whether to print verbose output during prediction. If True, information is 
-            logged using ``logging.INFO`` level. Default is False.
-
-        Returns
-        -------
-        NDArray
-            Class index of each pixel with shape (height, width), obtained by taking the argmax of 
-            ``"scores"`` (raw logits if ``normalize=False``) among the classes predicted as foreground.
-            
-            Pixels with no foreground class are set to ``ignore_label`` if it is not ``None``, 
-            otherwise an arbitrary class index by argmax (usually 0) is assigned.
-
-        """
-        # Check if the image embedding has been set
-        if not self._img_set:
-            raise ValueError("Image embedding has not been set. Use 'set_input()' method first.")
-
-        # Log the inference mode
-        if verbose:
-            add_txt = "(using background)" if include_background else "(only foreground)"
-            logger.info(f"Running per-class predictions {add_txt}")
-        
-        # Run predictions for each class
-        mask_logits, iou_scores = self.predict(include_background, verbose)
-        if verbose:
-            logger.info("Processing the predictions")
-
-        # Post-process the predictions
-        if verbose:
-            logger.info("Post-processing the predictions")
-        results = self.postprocess(
-            mask_logits,
-            iou_scores,
-            normalize=normalize,
-            weight_by_scores=weight_by_scores,
-            ignore_label=ignore_label,
-            mask_threshold=mask_threshold,
-            verbose=verbose
-        )
-
-        # Clear GPU memory
-        if self.device == "cuda":
-            torch.cuda.empty_cache()
-
-        return results["labels"]
-
-
-    # Private methods
-    # --------------------------------------------------------------
-    def _preprocess(
-            self,
-            image: NDArray,
-            input_points: NDArray,
-            target_labels: NDArray,
-            sorted_classes: List[str],
-            image_format: str
-    ):
-        # Update input attributes
-        self._class_names = sorted_classes
-        self.class_to_points = {}
-        # self._image = None
-        self._img_height = 0
-        self._img_width = 0
-        self._img_set = False
-
-        # Compute mapping from class names to coordinates
-        # TODO: What happens if there are no input points for a class?
-        for idx, class_name in enumerate(sorted_classes):
-            # Check if there are input points for the class
-            if idx not in target_labels:
-                logger.warning(f"No input points for class '{class_name}' (id={idx})")
-                continue
-
-            class_coords = input_points[target_labels == idx]
-            self.class_to_points[class_name] = class_coords
-            logger.debug(f"Total points for class '{class_name}': {len(class_coords)}")
-        logger.info(f"Total input points: {len(input_points)}")
-
-        # Set SAM embedding
-        t0 = time.perf_counter()
-        try:
-            logger.info("Calculating the image embeddings")
-            self.predictor.set_image(image=image, image_format=image_format)
-            self._img_height, self._img_width = image.shape[:2]
-            self._img_set = True
-            # self._image = image
-        except Exception as e:
-            if self.device == "cuda":
-                torch.cuda.empty_cache()
-            raise ValueError(f"Fail to calculate image embedding: {e}.") from e
-        
-        # Update the processing time for embeddings
-        embeddings_time = time.perf_counter() - t0
-        self.processing_times["embeddings"] = embeddings_time
-        logger.info(f"Image embeddings calculated in {embeddings_time:.3f} seconds")
-
-
-    def _get_class_points(self, class_name: str, include_background: bool) -> Tuple[NDArray, NDArray]:
-        """
-        Get the needed SAM's input points (coordinates and labels) for a specific class, 
-        optionally including background points.
-
-        Parameters
-        ----------
-        class_name : str
-            The name of the class for which to get the input points. 
-            Must be present in ``self._class_names`` attribute.
-        
-        include_background : bool
-            Whether to include background points in the input points.
-        
-        Returns
-        -------
-        Tuple[NDArray, NDArray]
-            A tuple containing two elements:
-            
-            1.  ``input_points``: 2D integer array of shape (N, 2) containing the ``(x, y)`` 
-                coordinates of the input points.
-            
-            2.  ``input_labels``: 1D integer array of shape (N,) containing the corresponding 
-                labels of the input points. A value of ``1`` indicates a positive point (foreground), 
-                while a value of ``0`` indicates a negative point (background).
-        """
-        if class_name not in self.class_to_points:
-            input_points = numpy.array([])
-            input_labels = numpy.array([])
-
-        else:
-            # Get positive class data
-            positive_points = self.class_to_points[class_name]
-
-            # Create the input points and labels
-            input_points_list: List[NDArray] = []
-            input_labels_list: List[NDArray] = []
-            input_points_list.append(positive_points)
-            input_labels_list.append(numpy.ones(shape=len(positive_points), dtype=int))
-
-            # Include negative points in the input points prompt
-            if include_background:
-                # Ordered list (not a set) so the sampling is reproducible
-                negative_list = [
-                    self.class_to_points[negative_class]
-                    for negative_class in self._class_names
-                    if (negative_class != class_name) and (negative_class in self.class_to_points)
-                ]
-
-                # Include negative points
-                if len(negative_list) > 0:
-                    negative_points = numpy.vstack(negative_list)
-                    input_points_list.append(negative_points)
-                    input_labels_list.append(numpy.zeros(shape=len(negative_points), dtype=int))
-
-                else:
-                    logger.warning(f"('{class_name}') No background points available")
-
-            # Create the inputs as arrays
-            input_points = numpy.vstack(input_points_list)
-            input_labels = numpy.concatenate(input_labels_list)
-
-        return input_points, input_labels
-
-    # TODO: Declare as public member so we can test different post-processing strategies without re-running the predictions
     def predict(
             self,
             include_background: bool,
@@ -605,6 +509,7 @@ class SparsePointsSamPredictor:
         if ignore_label is not None:
             # Only classes predicted as foreground compete for the pixel. The threshold is applied on
             # the raw logits (strict `>`, like SAM), so it does not depend on normalization or weighting
+            # If a class has a score less than or equal to the threshold, it is ignored
             candidates = class_scores.masked_fill(class_logits <= mask_threshold, -float("inf"))
 
         # Get labels from the scores
@@ -633,6 +538,102 @@ class SparsePointsSamPredictor:
             results["scores"] = class_scores.cpu().numpy()
 
         return results
+
+    def make_inference(
+            self,
+            include_background: bool,
+            normalize: bool = True,
+            weight_by_scores: bool = False,
+            ignore_label: Optional[int] = None,
+            mask_threshold: Optional[float] = None,
+            verbose: bool = False
+    ) -> NDArray:
+        """
+        Runs the SAM predictor on the input image and returns the predicted labels.
+
+        SAM is trained for promptable binary segmentation, so the raw logits of the independent
+        per-class forward passes (each with a different prompt configuration) are not guaranteed
+        to be calibrated or comparable across classes. The resulting ``"labels"`` map is therefore
+        a heuristic. The options ``normalize`` and ``weight_by_scores`` can be used to mitigate 
+        this issue and improve the comparability of the logits across classes.
+
+        Parameters
+        ----------
+        include_background : bool
+            If True, include background points (negative prompts) in the model input.
+            Default is False.
+
+        normalize : bool, optional
+            If True (default), the per-class logits are mapped to probabilities with a sigmoid
+            before being compared across classes. If False, SamPredictor raw logits are compared directly.
+
+        weight_by_scores : bool, optional
+            If True, the sigmoid probabilities of each class are multiplied by the SAM predicted
+            mask quality score (IoU prediction) of that class before comparing them.
+            Requires ``normalize=True``. Default is False.
+
+        ignore_label : int, optional
+            Label assigned to pixels where no class is predicted as foreground (every class logit is
+            below ``mask_threshold``). Must be outside ``[0, n_classes - 1]``.
+            If None (default), every pixel is assigned to a class by argmax (legacy behavior).
+
+        mask_threshold : float, optional
+            Raw logit threshold (``foreground = raw_logits > mask_threshold``). It is always applied 
+            to the raw logits, never to the sigmoid/IoU-weighted scores, so it is independent of 
+            ``normalize`` and ``weight_by_scores``. 
+            
+            Only used if ``ignore_label`` is not None. If None (default), the default SAM model 
+            ``mask_threshold`` value is used (0.0, equivalent to a sigmoid probability of 0.5).
+        
+        verbose : bool, optional
+            Whether to print verbose output during prediction. If True, information is 
+            logged using ``logging.INFO`` level. Default is False.
+
+        Returns
+        -------
+        NDArray
+            Class index of each pixel with shape (height, width), obtained by taking the argmax of 
+            ``"scores"`` (raw logits if ``normalize=False``) among the classes predicted as foreground.
+            
+            Pixels with no foreground class are set to ``ignore_label`` if it is not ``None``, 
+            otherwise an arbitrary class index by argmax (usually 0) is assigned.
+
+        """
+        # Check if the image embedding has been set
+        if not self._img_set:
+            raise ValueError("Image embedding has not been set. Use 'set_input()' method first.")
+
+        # Log the inference mode
+        if verbose:
+            add_txt = "(using background)" if include_background else "(only foreground)"
+            logger.info(f"Running per-class predictions {add_txt}")
+        
+        # Run predictions for each class
+        mask_logits, iou_scores = self.predict(include_background, verbose)
+        if verbose:
+            logger.info("Processing the predictions")
+
+        # Post-process the predictions
+        if verbose:
+            logger.info("Post-processing the predictions")
+        results = self.postprocess(
+            mask_logits,
+            iou_scores,
+            normalize=normalize,
+            weight_by_scores=weight_by_scores,
+            ignore_label=ignore_label,
+            mask_threshold=mask_threshold,
+            verbose=verbose
+        )
+
+        # Clear GPU memory
+        if self.device == "cuda":
+            torch.cuda.empty_cache()
+
+        return results["labels"]
+
+    
+
 
 
 
