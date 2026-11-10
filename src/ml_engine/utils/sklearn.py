@@ -15,7 +15,7 @@ logger = logging.getLogger("Utils.Sklearn")
 def classification_metrics(
         y_true: NDArray, 
         y_pred: NDArray, 
-        confidence_level: float = 0.95,
+        confidence_level: Optional[float] = 0.95,
         class_names: Optional[List[Any]] = None, 
     ) -> Dict[str, Any]:
     """
@@ -47,9 +47,9 @@ def classification_metrics(
         Ground truth and predicted target values, respectively. 
     
     confidence_level : float, optional
-        Confidence level for the accuracy confidence intervals. Computing is based on the 
-        Wilson score method trhough ``statsmodels.stats.proportion.proportion_confint``.
-        Default is 0.95 (95% confidence interval).
+        Level for the accuracy confidence interval (e.g., 0.95 for 95% confidence interval). 
+        Computing is based on the Wilson score method trhough ``statsmodels.stats.proportion.proportion_confint``.
+        If None (default), confidence intervals will not be computed.
     
     class_names : List[str], optional
         Names of the classes. If None (default), class names will be inferred from the 
@@ -82,14 +82,15 @@ def classification_metrics(
     ))
     
     # Confidence intervals (Wilson score method) for accuracy
-    ci_lower, ci_upper = cast(tuple, proportion_confint(
-        count=(y_true == y_pred).sum(),
-        nobs=len(y_true),
-        alpha=1 - confidence_level,
-        method="wilson"
-    ))
-    report["intervals"] = [float(ci_lower), float(ci_upper)]
-    
+    if confidence_level is not None:
+        ci_lower, ci_upper = cast(tuple, proportion_confint(
+            count=(y_true == y_pred).sum(),
+            nobs=len(y_true),
+            alpha=1 - confidence_level,
+            method="wilson"
+        ))
+        report["intervals"] = [float(ci_lower), float(ci_upper)]
+        
     # Cohen's kappa score
     cohen_kappa = cohen_kappa_score(y1=y_true, y2=y_pred)
     report["cohen_kappa"] = float(cohen_kappa)
