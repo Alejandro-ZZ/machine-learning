@@ -76,9 +76,10 @@ class SparsePointsSamPredictor:
         self._class_names: List[str] = []       # Class names for the points
         # self._image: Optional[NDArray] = None   # Image to predict on
         
-        # Current image dimensions (height, width) for the input image
+        # Current image dimensions (height, width) and status for the input image
         self._img_height: int = 0
         self._img_width: int = 0
+        self._img_set: bool = False
 
     def __str__(self):
         return (
@@ -246,7 +247,7 @@ class SparsePointsSamPredictor:
 
         """
         # Check if the image embedding has been set
-        if (self._img_height == 0) or (self._img_width == 0):
+        if not self._img_set:
             raise ValueError("Image embedding has not been set. Use 'set_input()' method first.")
 
         # Log the inference mode
@@ -292,6 +293,7 @@ class SparsePointsSamPredictor:
         # self._image = None
         self._img_height = 0
         self._img_width = 0
+        self._img_set = False
 
         # Compute mapping from class names to coordinates
         # TODO: What happens if there are no input points for a class?
@@ -312,6 +314,7 @@ class SparsePointsSamPredictor:
             logger.info("Calculating the image embeddings")
             self.predictor.set_image(image=image, image_format=image_format)
             self._img_height, self._img_width = image.shape[:2]
+            self._img_set = True
             # self._image = image
         except Exception as e:
             if self.device == "cuda":
@@ -608,6 +611,8 @@ class SparsePointsSamPredictor:
             results["scores"] = class_scores.cpu().numpy()
 
         return results
+
+
 
 
 def plot_class_logit_distributions(
