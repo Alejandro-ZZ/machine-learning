@@ -58,9 +58,17 @@ class SparsePointsSamPredictor:
         self.predictor = predictor
         self.device = device
 
-        self.processing_times: Dict[str, float] = {}        # General workflow processing times in seconds
-        self.prediction_times: Dict[str, float] = {}        # Per-class prediction times in seconds
-        self.class_to_points: Dict[str, NDArray] = {}       # Mapping from class names to (x, y) coordinates
+        # General workflow execution times (seconds)
+        self.execution_times: Dict[str, float] = {
+            "embeddings": 0.0,      # Time to compute the image embeddings
+            "inference": 0.0,       # Time to run the SAM predictions for all classes
+            "postprocessing": 0.0,  # Time to post-process the predictions
+            
+            # Additional key-value pairs for per-class prediction times will be added dynamically            
+        }
+
+
+        self.class_to_points: Dict[str, NDArray] = {}   # Mapping from class names to (x, y) coordinates
 
         # SAM's mask threshold for foreground detection (foreground = mask > threshold). 
         # It is used to determine whether a pixel is considered foreground for a class 
@@ -97,11 +105,16 @@ class SparsePointsSamPredictor:
     # --------------------------------------------------------------
     def _reset_state(self):
         """Reset the predictor state and clear all stored data."""
-        self.processing_times.clear()
-        self.prediction_times.clear()
+        self.execution_times.clear()
+        self.execution_times.update({
+            "embeddings": 0.0,
+            "inference": 0.0,
+            "postprocessing": 0.0,
+        })
+
         self.class_to_points.clear()
-        
         self._class_names.clear()
+
         # self._image = None
         self._img_height = 0
         self._img_width = 0
@@ -146,7 +159,7 @@ class SparsePointsSamPredictor:
         
         # Update the processing time for embeddings
         embeddings_time = time.perf_counter() - t0
-        self.processing_times["embeddings"] = embeddings_time
+        self.execution_times["embeddings"] = embeddings_time
         logger.info(f"Image embeddings calculated in {embeddings_time:.3f} seconds")
 
     def _get_class_points(self, class_name: str, include_background: bool) -> Tuple[NDArray, NDArray]:
@@ -406,8 +419,8 @@ class SparsePointsSamPredictor:
                         iou_score = float(mask_scores[0])
 
                     # Update the prediction time
-                    # self.processing_times["predictions"] = predictions_time
-                    self.prediction_times[class_name] = predictions_time
+                    key_class = class_name.lower().replace(" ", "_")
+                    self.execution_times[key_class] = predictions_time
                     final_prediction_time += predictions_time
                     if verbose:
                         logger.info(f"('{class_name}') Prediction time: {predictions_time:.4f} seconds")
@@ -427,7 +440,7 @@ class SparsePointsSamPredictor:
                 raise ValueError(f"('{class_name}') Failed to make SAM predictions: {e}") from e
 
         # Update the final prediction time
-        self.processing_times["predictions"] = final_prediction_time
+        self.execution_times["inference"] = final_prediction_time
         if verbose:
             logger.info(f"Total prediction time: {final_prediction_time:.4f} seconds")
 
@@ -486,15 +499,16 @@ class SparsePointsSamPredictor:
 
             *   "labels" (NDArray): class index of each pixel with shape (height, width), obtained by 
                 taking the argmax of ``"scores"`` (raw logits if ``normalize=False``) among the classes 
-                predicted as foreground. 
-                
-                Pixels with no foreground class are set to ``ignore_label`` if it is not ``None``, 
-                otherwise an arbitrary class index by argmax (usually 0) is assigned.
+                predicted as foreground. Pixels with no foreground class are set to ``ignore_label`` 
+                if it is not ``None``, otherwise an arbitrary class index by argmax (usually 0) is assigned.
 
-            *   "scores" (NDArray): if ``normalize=True``, sigmoid probabilities (optionally IoU-weighted) 
+            *   "scores" (NDArray): sigmoid probabilities (optionally IoU-weighted) 
                 with shape (n_classes, height, width). Omitted if ``normalize=False``.
 
         """
+        # Start the post-processing timer
+        t0 = time.perf_counter()
+        
         # Check arguments
         if mask_threshold is None:
             mask_threshold = self.mask_threshold
@@ -545,6 +559,9 @@ class SparsePointsSamPredictor:
         }
         if normalize:
             results["scores"] = class_scores.cpu().numpy()
+
+        # Update the post-processing time
+        self.execution_times["postprocessing"] = time.perf_counter() - t0
 
         return results
 
