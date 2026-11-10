@@ -95,6 +95,18 @@ class SparsePointsSamPredictor:
 
     # Private methods
     # --------------------------------------------------------------
+    def _reset_state(self):
+        """Reset the predictor state and clear all stored data."""
+        self.processing_times.clear()
+        self.prediction_times.clear()
+        self.class_to_points.clear()
+        
+        self._class_names.clear()
+        # self._image = None
+        self._img_height = 0
+        self._img_width = 0
+        self._img_set = False
+    
     def _preprocess(
             self,
             image: NDArray,
@@ -103,14 +115,6 @@ class SparsePointsSamPredictor:
             sorted_classes: List[str],
             image_format: str
     ):
-        # Update input attributes
-        self._class_names = sorted_classes
-        self.class_to_points = {}
-        # self._image = None
-        self._img_height = 0
-        self._img_width = 0
-        self._img_set = False
-
         # Compute mapping from class names to coordinates
         # TODO: What happens if there are no input points for a class?
         for idx, class_name in enumerate(sorted_classes):
@@ -136,6 +140,9 @@ class SparsePointsSamPredictor:
             if self.device == "cuda":
                 torch.cuda.empty_cache()
             raise ValueError(f"Fail to calculate image embedding: {e}.") from e
+
+        # Update the class names
+        self._class_names = sorted_classes
         
         # Update the processing time for embeddings
         embeddings_time = time.perf_counter() - t0
@@ -241,6 +248,8 @@ class SparsePointsSamPredictor:
             The color format of the image channels. It can be either "RGB" or "BGR".
             Default is "RGB".
         """
+        self._reset_state()
+        
         # Check the image format
         image_format = image_format.upper().strip()
         if image_format not in self._IMAGE_FORMATS:
