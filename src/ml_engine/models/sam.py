@@ -618,8 +618,9 @@ class SparsePointsSamPredictor:
         Returns
         -------
         NDArray
-            Class index of each pixel with shape (height, width), obtained by taking the argmax of 
-            ``"scores"`` (raw logits if ``normalize=False``) among the classes predicted as foreground.
+            Predicted label mask with shape (height, width), where each pixel is assigned a class index.
+            Argmax of ``"scores"`` (raw logits if ``normalize=False``) is used among the classes predicted 
+            as foreground.
             
             Pixels with no foreground class are set to ``ignore_label`` if it is not ``None``, 
             otherwise an arbitrary class index by argmax (usually 0) is assigned.
@@ -636,12 +637,10 @@ class SparsePointsSamPredictor:
         
         # Run predictions for each class
         mask_logits, iou_scores = self.predict(include_background, verbose)
-        if verbose:
-            logger.info("Processing the predictions")
 
         # Post-process the predictions
         if verbose:
-            logger.info("Post-processing the predictions")
+            logger.info("Post-processing predicted mask logits")
         results = self.postprocess(
             mask_logits,
             iou_scores,
