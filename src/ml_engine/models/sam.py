@@ -154,8 +154,10 @@ class SparsePointsSamPredictor:
                 torch.cuda.empty_cache()
             raise ValueError(f"Fail to calculate image embedding: {e}.") from e
 
-        # Update the class names
-        self._class_names = sorted_classes
+        # Update the class names (avoid external modifications by using class attribute object)
+        # Class names list is already cleared by "_reset_state()" called in "set_input()"
+        for class_name in sorted_classes:
+            self._class_names.append(class_name)
         
         # Update the processing time for embeddings
         embeddings_time = time.perf_counter() - t0
@@ -306,7 +308,7 @@ class SparsePointsSamPredictor:
         if len(diff) > 0:
             raise ValueError(
                 f"Target labels must be in the range of class names indices. "
-                f"Got: unique_labels={uq_target_labels}. Expected range: [0, {n_classes - 1}]"
+                f"Got: unique_labels={list(uq_target_labels)}. Expected range: [0, {n_classes - 1}]"
             )
 
         # Check for invalid x and y coordinates
@@ -382,7 +384,7 @@ class SparsePointsSamPredictor:
                 if verbose:
                     logger.info(
                         f"('{class_name}') Predicting mask: "
-                        f"id={class_idx}, "
+                        f"class_id={class_idx}, "
                         f"total_points={len(input_points)}, "
                         f"foregrounds={numpy.sum(input_labels == 1)}, "
                         f"backgrounds={numpy.sum(input_labels == 0)}"
