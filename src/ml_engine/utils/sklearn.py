@@ -1,8 +1,9 @@
 import logging
-from typing import Any, cast, Dict, List, Optional
+from typing import Any, cast, Dict, List, Optional, Tuple
 
 
 import numpy
+from matplotlib.figure import Figure
 from numpy.typing import NDArray
 from sklearn.metrics import classification_report, jaccard_score, cohen_kappa_score
 from statsmodels.stats.proportion import proportion_confint
@@ -206,3 +207,117 @@ def display_classification_metrics(
         tablefmt=format, 
         # floatfmt=f".{digits}f"
     ))
+
+
+def plot_classification_metrics(
+        report: Dict[str, Any],
+        class_names: List[str],
+        average: str = "macro",
+        title: Optional[str] = None,
+        digits: int = 3,
+        figsize: Tuple[float, float] = (12, 4.5),
+    ) -> Figure:
+    """
+    Plot a classification report (from ``classification_metrics``) as two bar plot subplots
+    sharing the y-axis (metric score), using a minimalist scientific style.
+
+    * Left: per-class grouped bars (f1-score, recall, precision). Recall and precision are
+      drawn with transparency to emphasize the f1-score.
+    * Right: overall float metrics (``accuracy``, ``cohen_kappa``, and the ``<average> avg`` metrics
+      except ``support``). List values (e.g. ``intervals``) are skipped.
+
+    Parameters
+    ----------
+    report : Dict[str, Any]
+        Report returned by ``classification_metrics``.
+
+    class_names : List[str]
+        Names of the classes in the report.
+
+    average : str, optional
+        Average used for the overall metrics: "macro" (default) or "weighted".
+
+    title : str, optional
+        General title of the figure.
+
+    digits : int, optional
+        Decimal digits shown in the bar labels. Default is 3.
+
+    figsize : Tuple[float, float], optional
+        Figure size in inches.
+
+    Returns
+    -------
+    Figure
+        The matplotlib figure.
+    """
+    import matplotlib.pyplot as plt
+    import pandas
+    import seaborn
+
+    per_class_metrics = ["f1-score", "recall", "precision"]
+    alphas = {"f1-score": 1.0, "recall": 0.55, "precision": 0.3}
+
+    # Per-class data in long format
+    class_df = pandas.DataFrame([
+        {"Class": name, "Metric": metric, "Score": float(report[name][metric])}
+        for name in class_names
+        for metric in per_class_metrics
+    ])
+
+    # Overall data: only float values (excludes support and list-valued metrics)
+    overall: Dict[str, float] = {}
+    for name, value in {**report, **report[f"{average} avg"]}.items():
+        if name != "support" and isinstance(value, (float, numpy.floating)):
+            overall[name] = float(value)
+    overall_df = pandas.DataFrame({"Metric": list(overall.keys()), "Score": list(overall.values())})
+
+    with seaborn.axes_style("ticks"), plt.rc_context({"font.family": "sans-serif"}):
+        fig, (ax_class, ax_overall) = plt.subplots(1, 2, figsize=figsize, sharey=True)
+        palette = seaborn.color_palette("deep")
+        base_color = palette[0]
+
+        seaborn.barplot(
+            data=class_df, x="Class", y="Score", hue="Metric", hue_order=per_class_metrics,
+            palette={m: base_color for m in per_class_metrics}, ax=ax_class
+        )
+        # Containers follow hue order; apply alpha per metric and label bars
+        for container, metric in zip(ax_class.containers, per_class_metrics):
+            for bar in container:  # type: ignore[attr-defined]
+                bar.set_alpha(alphas[metric])
+            ax_class.bar_label(container, fmt=f"%.{digits}f", padding=2, fontsize=8, rotation=0)  # type: ignore[arg-type]
+        legend = ax_class.get_legend()
+        if legend is not None:
+            legend.remove()
+        handles = [
+            plt.Rectangle((0, 0), 1, 1, color=base_color, alpha=alphas[m]) for m in per_class_metrics
+        ]
+        ax_class.legend(
+            handles, per_class_metrics, frameon=False, loc="upper center",
+            bbox_to_anchor=(0.5, -0.1), ncol=3
+        )
+        ax_class.set_title("Per-class metrics")
+        ax_class.set_xlabel("")
+        ax_class.set_ylabel("Score")
+
+        seaborn.barplot(data=overall_df, x="Metric", y="Score", color=palette[1], ax=ax_overall)
+        for container in ax_overall.containers:
+            ax_overall.bar_label(container, fmt=f"%.{digits}f", padding=2, fontsize=8)  # type: ignore[arg-type]
+        ax_overall.set_title(f"Overall metrics ({average} avg)")
+        ax_overall.set_xlabel("")
+        ax_overall.set_ylabel("")
+        ax_overall.tick_params(axis="x", rotation=30)
+
+        # Headroom for labels; remove top and right spines
+        ymin = min(0.0, float(min(class_df["Score"].min(), overall_df["Score"].min())))
+        ax_class.set_ylim(ymin, 1.15)
+        seaborn.despine(fig=fig, top=True, right=True)
+
+        if title:
+            fig.suptitle(title, fontweight="bold")
+        fig.tight_layout()
+
+    return fig
+
+
+
